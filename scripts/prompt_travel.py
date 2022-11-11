@@ -39,10 +39,7 @@ import modules.styles
 def process_images_inner_half_A(p: StableDiffusionProcessing) -> tuple:
     """this is the main loop that both txt2img and img2img use; it calls func_init once inside all the scopes and func_sample once per batch"""
 
-    if type(p.prompt) == list:
-        assert(len(p.prompt) > 0)
-    else:
-        assert p.prompt is not None
+    assert p.prompt is not None
 
     with open(os.path.join(shared.script_path, "params.txt"), "w", encoding="utf8") as file:
         processed = Processed(p, [], p.seed, "")
@@ -50,33 +47,22 @@ def process_images_inner_half_A(p: StableDiffusionProcessing) -> tuple:
 
     devices.torch_gc()
 
-    seed    = get_fixed_seed(p.seed)
-    subseed = get_fixed_seed(p.subseed)
+    seed    = p.seed
+    subseed = p.subseed
 
     modules.sd_hijack.model_hijack.apply_circular(p.tiling)
     modules.sd_hijack.model_hijack.clear_comments()
 
     shared.prompt_styles.apply_styles(p)
 
-    if type(p.prompt) == list:
-        p.all_prompts = p.prompt
-    else:
-        p.all_prompts = p.batch_size * 1 * [p.prompt]
-
-    if type(seed) == list:
-        p.all_seeds = seed
-    else:
-        p.all_seeds = [int(seed) + (x if p.subseed_strength == 0 else 0) for x in range(len(p.all_prompts))]
-
-    if type(subseed) == list:
-        p.all_subseeds = subseed
-    else:
-        p.all_subseeds = [int(subseed) + x for x in range(len(p.all_prompts))]
+    p.all_prompts  = p.batch_size * 1 * [p.prompt]
+    p.all_seeds    = [int(seed) + (x if p.subseed_strength == 0 else 0) for x in range(len(p.all_prompts))]
+    p.all_subseeds = [int(subseed) + x for x in range(len(p.all_prompts))]
 
     if os.path.exists(cmd_opts.embeddings_dir) and not p.do_not_reload_embeddings:
         model_hijack.embedding_db.load_textual_inversion_embeddings()
 
-    if p.scripts is not None:
+    if hasattr(p, 'scripts') and p.scripts is not None:
         p.scripts.process(p)
 
     with torch.no_grad(), p.sd_model.ema_scope():
@@ -91,12 +77,12 @@ def process_images_inner_half_A(p: StableDiffusionProcessing) -> tuple:
         seeds    = p.all_seeds   [n * p.batch_size : (n + 1) * p.batch_size]
         subseeds = p.all_subseeds[n * p.batch_size : (n + 1) * p.batch_size]
 
-        if p.scripts is not None:
+        if hasattr(p, 'scripts') and p.scripts is not None:
             p.scripts.process_batch(p, batch_number=n, prompts=prompts, seeds=seeds, subseeds=subseeds)
 
         with devices.autocast():
             uc = prompt_parser.get_learned_conditioning(shared.sd_model, len(prompts) * [p.negative_prompt], p.steps)
-            c = prompt_parser.get_multicond_learned_conditioning(shared.sd_model, prompts, p.steps)
+            c  = prompt_parser.get_multicond_learned_conditioning(shared.sd_model, prompts, p.steps)
 
             return c, uc, prompts, seeds, subseeds
 
@@ -119,7 +105,6 @@ def process_images_inner_half_B(p: StableDiffusionProcessing, c, uc, prompts, se
 
         if shared.cmd_opts.lowvram or shared.cmd_opts.medvram:
             lowvram.send_everything_to_cpu()
-
         devices.torch_gc()
 
         if opts.filter_nsfw:
@@ -133,10 +118,10 @@ def process_images_inner_half_B(p: StableDiffusionProcessing, c, uc, prompts, se
 
             if p.restore_faces:
                 if opts.save and not p.do_not_save_samples and opts.save_images_before_face_restoration:
-                    images.save_image(Image.fromarray(x_sample), p.outpath_samples, "", seeds[i], prompts[i], opts.samples_format, info=infotext(n, i), p=p, suffix="-before-face-restoration")
+                    images.save_image(Image.fromarray(x_sample), p.outpath_samples, "", seeds[i], prompts[i], opts.samples_format, 
+                                      info=infotext(n, i), p=p, suffix="-before-face-restoration")
 
                 devices.torch_gc()
-
                 x_sample = modules.face_restoration.restore_faces(x_sample)
                 devices.torch_gc()
 
@@ -145,7 +130,8 @@ def process_images_inner_half_B(p: StableDiffusionProcessing, c, uc, prompts, se
             if p.color_corrections is not None and i < len(p.color_corrections):
                 if opts.save and not p.do_not_save_samples and opts.save_images_before_color_correction:
                     image_without_cc = apply_overlay(image, p.paste_to, i, p.overlay_images)
-                    images.save_image(image_without_cc, p.outpath_samples, "", seeds[i], prompts[i], opts.samples_format, info=infotext(n, i), p=p, suffix="-before-color-correction")
+                    images.save_image(image_without_cc, p.outpath_samples, "", seeds[i], prompts[i], opts.samples_format, 
+                                      info=infotext(n, i), p=p, suffix="-before-color-correction")
                 image = apply_color_correction(p.color_corrections[i], image)
 
             image = apply_overlay(image, p.paste_to, i, p.overlay_images)
@@ -155,8 +141,7 @@ def process_images_inner_half_B(p: StableDiffusionProcessing, c, uc, prompts, se
 
             text = infotext(n, i)
             infotexts.append(text)
-            if opts.enable_pnginfo:
-                image.info["parameters"] = text
+            if opts.enable_pnginfo: image.info["parameters"] = text
             output_images.append(image)
 
         del x_samples_ddim 
@@ -172,9 +157,11 @@ def process_images_inner_half_B(p: StableDiffusionProcessing, c, uc, prompts, se
         for comment in model_hijack.comments:
             comments[comment] = 1
 
-    res = Processed(p, output_images, p.all_seeds[0], infotext() + "".join(["\n\n" + x for x in comments]), subseed=p.all_subseeds[0], all_prompts=p.all_prompts, all_seeds=p.all_seeds, all_subseeds=p.all_subseeds, index_of_first_image=0, infotexts=infotexts)
+    res = Processed(p, output_images, p.all_seeds[0], infotext() + "".join(["\n\n" + x for x in comments]), 
+                    subseed=p.all_subseeds[0], all_prompts=p.all_prompts, all_seeds=p.all_seeds, all_subseeds=p.all_subseeds, 
+                    index_of_first_image=0, infotexts=infotexts)
 
-    if p.scripts is not None:
+    if hasattr(p, 'scripts') and p.scripts is not None:
         p.scripts.postprocess(p, res)
 
     return res
@@ -266,15 +253,17 @@ class Script(scripts.Script):
         p.batch_size = 1
 
         # Random unified const seed
-        if p.seed == -1: seed = random.randint(0, 2147483647)
-        else:            seed = p.seed
-        print('seed:', seed)
+        p.seed             = get_fixed_seed(p.seed)
+        p.subseed          = p.seed
+        p.subseed_strength = 0.0
+        print('seed:', p.seed)
 
         # Start job
         state.job_count = count
         print(f"Generating {count} images.")
 
         def weighted_sum(A, B, alpha, kind):
+            ''' linear interpolate on latent space '''
             C = deepcopy(A)
             if kind == 'pos':
                 condA = A.batch[0][0].schedules[0].cond
@@ -290,22 +279,23 @@ class Script(scripts.Script):
                 C[0][0] = ScheduledPromptConditioning(end_at_step, condC)
             return C
 
-        # draw the first image
+        def draw_by_cond(pos_hidden, neg_hidden, prompts, seeds, subseeds):
+            nonlocal images, initial_info, p
+            proc = process_images_inner_half_B(p, pos_hidden, neg_hidden, prompts, seeds, subseeds)
+            if initial_info is None: initial_info = proc.info
+            images += proc.images
+
+        # Step 1: draw the init image
         if show_debug:
             print(f'[stage 1/{n_stages}]')
             print(f'  pos prompts: {pos_prompts[0]}')
             print(f'  neg prompts: {neg_prompts[0]}')
         p.prompt           = pos_prompts[0]
         p.negative_prompt  = neg_prompts[0]
-        p.seed             = seed
-        p.subseed          = None
-        p.subseed_strength = 0.0
         from_pos_hidden, from_neg_hidden, prompts, seeds, subseeds = process_images_inner_half_A(p)
-        proc = process_images_inner_half_B(p, from_pos_hidden, from_neg_hidden, prompts, seeds, subseeds)
-        if initial_info is None: initial_info = proc.info
-        images += proc.images
+        draw_by_cond(from_pos_hidden, from_neg_hidden, prompts, seeds, subseeds)
         
-        # travel through every stages
+        # travel through stages
         for i in range(1, n_stages):
             if state.interrupted: break
 
@@ -317,29 +307,25 @@ class Script(scripts.Script):
             # only change target prompts
             p.prompt           = pos_prompts[i]
             p.negative_prompt  = neg_prompts[i]
-            p.seed             = seed
-            p.subseed          = None
-            p.subseed_strength = 0.0
             to_pos_hidden, to_neg_hidden, prompts, seeds, subseeds = process_images_inner_half_A(p)
 
-            # draw the interpolated images
+            # Step 2: draw the interpolated images
             n_inter = steps[i] + 1
-            for t in range(1, n_inter + 1):
+            for t in range(1, n_inter):
                 if state.interrupted: break
 
-                alpha = t / n_inter     # [1/N, 2/N, .. N/N=1], including the target stage
+                alpha = t / n_inter     # [1/T, 2/T, .. T-1/T]
                 inter_pos_hidden = weighted_sum(from_pos_hidden, to_pos_hidden, alpha, kind='pos')
                 inter_neg_hidden = weighted_sum(from_neg_hidden, to_neg_hidden, alpha, kind='neg')
+                draw_by_cond(inter_pos_hidden, inter_neg_hidden, prompts, seeds, subseeds)
 
-                proc = process_images_inner_half_B(p, inter_pos_hidden, inter_neg_hidden, prompts, seeds, subseeds)
-                if initial_info is None: initial_info = proc.info
-                images += proc.images
-
+            # Step 3: draw the fianl stage
+            draw_by_cond(to_pos_hidden, to_neg_hidden, prompts, seeds, subseeds)
+            
             # move to next stage
-            from_pos_hidden = to_pos_hidden
-            from_neg_hidden = to_neg_hidden
+            from_pos_hidden, from_neg_hidden = to_pos_hidden, to_neg_hidden
 
-        if video_save:
+        if video_save and len(images) > 1:
             try:
                 clip = ImageSequenceClip([np.asarray(t) for t in images], fps=video_fps)
                 clip.write_videofile(os.path.join(travel_path, f"travel-{travel_number:05}.mp4"), verbose=False, audio=False, logger=None)

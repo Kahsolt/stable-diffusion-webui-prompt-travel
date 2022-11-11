@@ -18,7 +18,7 @@ now we do not modify on text char level, but do linear interpolating on the hidd
 - generate image one by one (batch configs are ignored)
 - gradually change the digested inputs between prompts
   - freeze all other settings (steps, sampler, cfg factor, rand seed, etc.)
-  - force `subseed = None`
+  - force `subseed == seed, subseed_strength = 0.0`
 - gather to be a video!
 
 DDIM:
