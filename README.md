@@ -5,13 +5,21 @@
 ----
 
 This is the more human-sensible version of [stable-diffusion-webui-prompt-erosion](https://github.com/Kahsolt/stable-diffusion-webui-prompt-erosion), 
-now we do not modify on text char level, but do linear interpolating on the hidden embedded vectors. 😀
+now we do not modify on text char level, but do linear interpolating on the hidden embedded vectors. 😀  
 
-⚠ Though this is still not the best way to do semantics interpolate, future works will continue to explorer.
-⚠ 尽管线性插值仍然不是最连续流畅的过渡方式，之后的工作将探索是否能通过探测梯度下降方向来插值（但是先摸一会儿别的东西了 :lolipop:
+⚠ 我们成立了插件反馈 QQ 群: 616795645 (赤狐屿)，欢迎出建议、意见、报告bug等 (w  
+⚠ We have a QQ chat group now: 616795645, any suggeustion, discussion and bug reports are highly wellllcome !!  
 
-ℹ 实话不说，我想有可能通过这个来做ppt童话绘本<del>甚至本子</del>……
-ℹ 聪明的用法：先手工盲搜两张好看的图 (只有prompt差异)，然后再尝试在其间 travel 😀
+ℹ 实话不说，我想有可能通过这个来做ppt童话绘本<del>甚至本子</del>……  
+ℹ 聪明的用法：先手工盲搜两张好看的图 (只有prompt差异)，然后再尝试在其间 travel :lolipop:  
+
+
+### Change Log
+
+- 2022/11/14: walk by substituting word embedding ('replace' mode)
+- 2022/11/13: walk by optimizing condition ('grad' mode)
+- 2022/11/10: interpolate linearly  on condition/uncondition ('linear' mode)
+
 
 ### How it works?
 
@@ -21,53 +29,93 @@ now we do not modify on text char level, but do linear interpolating on the hidd
   - force `subseed == seed, subseed_strength = 0.0`
 - gather to be a video!
 
-DDIM:
+**DDIM**:
+
 ![DDIM](img/ddim.gif)
 
-Eular a:
+**Eular a**:
+
 ![eular_a](img/eular_a.gif)
 
-ℹ 在原始的 prompt 框里输入正面/负面提示词，每一行表示一个stage
-ℹ 在左下角的插件栏修改 stage之间的补帧数量 和 视频输出帧率
-
-```
-[postive prompts]
-(((masterpiece))), highres, ((boy)), child, cat ears, white hair, red eyes, yellow bell, red cloak, barefoot, angel, [flying], egyptian
-((masterpiece)), highres, ((girl)), loli, cat ears, light blue hair, red eyes, magical wand, barefoot, [running]
-
-[negative prompts]
-(((nsfw))), ugly,duplicate,morbid,mutilated,tranny,trans,trannsexual,mutation,deformed,long neck,bad anatomy,bad proportions,extra arms,extra legs, disfigured,more than 2 nipples,malformed,mutated,hermaphrodite,out of frame,extra limbs,missing arms,missing legs,poorly drawn hands,poorty drawn face,mutation,poorly drawn,long body,multiple breasts,cloned face,gross proportions, mutated hands,bad hands,bad feet,long neck,missing limb,malformed limbs,malformed hands,fused fingers,too many fingers,extra fingers,missing fingers,extra digit,fewer digits,mutated hands and fingers,lowres,text,error,cropped,worst quality,low quality,normal quality,jpeg artifacts,signature,watermark,username,blurry,text font ufemale focus, poorly drawn, deformed, poorly drawn face, (extra leg:1.3), (extra fingers:1.2),out of frame
-
-[steps]
-45
-```
 
 ### Options
 
-- postive prompts: (list of strings)
-- negative prompts: (list of strings)
-  - each line is a prompt stage
-  - if len(postive) != len(negative), the shorter one's last item will be repeated to match the longer one
+- prompt: (list of strings)
+- negative prompt: (list of strings)
+  - we call each line of prompt a stage
+  - if len(postive_prompts) != len(negative_prompts), the shorter one's last item will be repeated to match the longer one
+- mode: (categorical)
+  - linear: interpolate linearly on condition/uncondition in latent space
+  - replace: walk by gradually substituting word embededings 
+  - grad: walk by optimizing certain loss (see [Experimental](#experimental))
+  - NOTE: `walk` methods might not reach target stages in specified steps, manually tune `grad_alpha` or increase `steps` in that case accroding to log losses...
 - steps: (int, list of int)
-  - travel from stage1 to stage2 in n steps (即补帧数量)
-  - if single int, constant number of images between two successive stages
-  - if list of ints, should match `len(stages)-1`， e.g.: `12, 24, 36`
+  - number of images to interpolate between two successive stages<del>, set `-1` to allow wanderding util converge for `walk` methods (not yet implemented)</del>
+  - if int, constant number of travel steps
+  - if list of int, length should match `len(stages)-1`, separate by comma, e.g.: `12, 24, 36`
+- replace_*
+  - replace_order: (categorical)
+    - `random`: substitute tokens randomly
+    - `similiar`: substitute most similiar tokens first (L1 distance of token embeddings)
+    - `different`: substitute most diffrent tokens first (L1 distance of token embeddings)
+- grad_*
+  - grad_alpha: (float), step size of a walk pace
+  - grad_iter: (int), step count of walk paces
+    - you can try trading `grad_alpha=0.01 grad_iter=1` for `grad_alpha=0.001 grad_iter=10`
+    - might be more cautious (perhaps!), but definitely takes more time
+  - grad_meth: (categorical), step function of a walk pace
+    - `clip`: a triky balance between `sign` and `tanh`
+    - `sign`: walk at a constant speed (often stucks into oscillation at the end)
+    - `tanh`: significantly speed down when approching (it takes infinite time to exactly reach...)
+  - grad_w_latent: (float), weight factor of `loss_latent`
+  - grad_w_match: (float), weight factor of `loss_cond`
+- fps: (float)
+  - FPS of video, set 0 to disable saving
+- debug: (bool)
+  - whether show verbose debug info at console
 
-⚠ this feature does NOT support the **schedule** syntax (i.e.: `[propmt:propmt:number]`), because I don't know how to interpolate between different schedule plans :(
-ℹ max length diff for each prompts should not exceed `75` in token count, cos' I also don't know how to interpolate between different-lengthed tensors :)
+⚠ this script will NOT support the schedule syntax (i.e.: `[prompt:prompt:number]`), because I don't know how to interpolate between different schedule plans :(  
+⚠ max length diff for each prompts should NOT exceed `75` in token count, otherwise will only work on the first segment, cos' I also don't know how to interpolate between different-lengthed tensors 🤔  
 
 
 ### Installation
 
 Easiest way to install it is to:
-1. Go to the "Extensions" tab in the webui
-2. Click on the "Install from URL" tab
-3. Paste https://github.com/Kahsolt/stable-diffusion-webui-prompt-travel.git into "URL for extension's git repository" and click install
-4. (Optional) You will need to restart the webui for dependensies to be installed or you won't be able to generate video files.
+1. Go to the "Extensions" tab in the webui, switch to the "Install from URL" tab
+2. Paste https://github.com/Kahsolt/stable-diffusion-webui-prompt-travel.git into "URL for extension's git repository" and click install
+3. (Optional) You will need to restart the webui for dependencies to be installed or you won't be able to generate video files
 
 Manual install:
-1. Copy the file in the scripts-folder to the scripts-folder from https://github.com/AUTOMATIC1111/stable-diffusion-webui
-2. Add `moviepy==1.0.3` to requirements_versions.txt
+1. Copy this repo folder to the 'extensions' folder of https://github.com/AUTOMATIC1111/stable-diffusion-webui
+2. (Optional) Restart the webui
+
+
+### Experimental
+
+⚪ 'grad' mode
+
+The `loss_latent` optimizes `mse_loss(current_generated_latent, target_latent)` 
+
+  - if `grad_w_latent` is positive, minimizing
+  - if `grad_w_latent` is negative, maximizing
+
+The `loss_cond` optimizes `l1_loss(current_cond, next_stage_cond)`
+
+  - if `grad_w_cond` is positive, walk towards the next stage (minimizing)
+  - if `grad_w_cond` is negative, walk away from it (maximizing)
+
+Grid search results: (`steps=100, grad_alpha=0.01, grad_iter=1, grad_meth='clip'`)
+
+| w_cond\w_latent | -1 | 0 | 1 |
+| :-: | :-: | :-: | :-: |
+| -1 | 纹理丢失色块平滑、逆向胚胎发育，最后变成圆圈堆叠成的抽象小人 | 前几步变得精致，随后纹理丢失色块平滑，但保持作画结构，中途突然高斯模糊，旋即背景失去语义，最后变成斑点图，l_grad下降 | 走到三张别的图，画风基本一致，背景变朦胧，途中震荡，最后人物没了，变得几何重复 |
+| 0 | 纹理丢失色块平滑、逆向胚胎发育，最后变成圆圈堆叠成的抽象小人，l_l1上升 | - | 走到两张别的图，画风基本一致，背景变朦胧，途中震荡，l_l1上升 |
+| 1 | 纹理丢失色块平滑、逆向胚胎发育，最后变成圆形蒙版、光栅纹理 | **近似线性插值，叠加式过渡到目标，途中震荡，l_grad下降** | 走到两张别的图，画风基本一致，背景变朦胧，最后震荡 |
+
+(*) 上表如无特殊说明，其各项 loss 变化都符合设置的优化方向  
+(**) 我们似乎应当总是令 `w_latent > 0`，而 `w_cond` 的设置似乎很玄学，这里可能遭遇了对抗样本现象(神经网络的过度线性性)……  
+
+ℹ NOTE: When 'prompt' has only single line, it will wander just **around** the init stage, dynamically balancing `loss_latent` and `loss_cond`; this allows you to discover neighbors of your given prompt 😀
 
 ----
 
