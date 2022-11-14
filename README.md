@@ -8,7 +8,7 @@ This is the more human-sensible version of [stable-diffusion-webui-prompt-erosio
 now we do not modify on text char level, but do linear interpolating on the hidden embedded vectors. 😀  
 
 ⚠ 我们成立了插件反馈 QQ 群: 616795645 (赤狐屿)，欢迎出建议、意见、报告bug等 (w  
-⚠ We have a QQ chat group now: 616795645, any suggeustion, discussion and bug reports are highly wellllcome !!  
+⚠ We have a QQ chat group now: 616795645, any suggeustions, discussions and bug reports are highly wellllcome !!  
 
 ℹ 实话不说，我想有可能通过这个来做ppt童话绘本<del>甚至本子</del>……  
 ℹ 聪明的用法：先手工盲搜两张好看的图 (只有prompt差异)，然后再尝试在其间 travel :lolipop:  
@@ -16,7 +16,7 @@ now we do not modify on text char level, but do linear interpolating on the hidd
 
 ### Change Log
 
-- 2022/11/14: walk by substituting word embedding ('replace' mode)
+- 2022/11/14: walk by substituting token embedding ('replace' mode)
 - 2022/11/13: walk by optimizing condition ('grad' mode)
 - 2022/11/10: interpolate linearly  on condition/uncondition ('linear' mode)
 
@@ -47,17 +47,19 @@ now we do not modify on text char level, but do linear interpolating on the hidd
 - mode: (categorical)
   - linear: interpolate linearly on condition/uncondition in latent space
   - replace: walk by gradually substituting word embededings 
-  - grad: walk by optimizing certain loss (see [Experimental](#experimental))
-  - NOTE: `walk` methods might not reach target stages in specified steps, manually tune `grad_alpha` or increase `steps` in that case accroding to log losses...
+  - grad: walk by optimizing certain loss
+  - NOTE: `walk` methods might not reach target stages in specified steps some times, or reached earlier than expect, in that case, manually tune `grad_alpha` and `steps`  might help a little...
 - steps: (int, list of int)
-  - number of images to interpolate between two successive stages<del>, set `-1` to allow wanderding util converge for `walk` methods (not yet implemented)</del>
+  - number of images to interpolate between two successive stages
   - if int, constant number of travel steps
   - if list of int, length should match `len(stages)-1`, separate by comma, e.g.: `12, 24, 36`
 - replace_*
   - replace_order: (categorical)
     - `random`: substitute tokens randomly
     - `similiar`: substitute most similiar tokens first (L1 distance of token embeddings)
-    - `different`: substitute most diffrent tokens first (L1 distance of token embeddings)
+    - `different`: substitute most diffrent tokens first
+    - `grad_min`: substitute tokens that causing smallest gradient first (gradient settings same as in `grad` mode)
+    - `grad_max`: substitute tokens that causing largest gradient first
 - grad_*
   - grad_alpha: (float), step size of a walk pace
   - grad_iter: (int), step count of walk paces
@@ -68,9 +70,9 @@ now we do not modify on text char level, but do linear interpolating on the hidd
     - `sign`: walk at a constant speed (often stucks into oscillation at the end)
     - `tanh`: significantly speed down when approching (it takes infinite time to exactly reach...)
   - grad_w_latent: (float), weight factor of `loss_latent`
-  - grad_w_match: (float), weight factor of `loss_cond`
+  - grad_w_cond: (float), weight factor of `loss_cond`
 - fps: (float)
-  - FPS of video, set 0 to disable saving
+  - FPS of video, set `0` to disable saving
 - debug: (bool)
   - whether show verbose debug info at console
 
@@ -116,6 +118,13 @@ Grid search results: (`steps=100, grad_alpha=0.01, grad_iter=1, grad_meth='clip'
 (**) 我们似乎应当总是令 `w_latent > 0`，而 `w_cond` 的设置似乎很玄学，这里可能遭遇了对抗样本现象(神经网络的过度线性性)……  
 
 ℹ NOTE: When 'prompt' has only single line, it will wander just **around** the init stage, dynamically balancing `loss_latent` and `loss_cond`; this allows you to discover neighbors of your given prompt 😀
+
+⚪ 'replace' mode
+
+This mode working on token embed input level, hence your can view `log.txt` to see how your input tokens are gradually changed.  
+⚠ Remeber that comma is a normal valid token, so you might see many commas there. However, they are different when appearing at different positions within the token sequence.  
+
+The actual token replacing order might reveal some information of the token importances, might the listed '>> grad ascend' or '>> embed L1-distance ascend' give you some ideas to tune your input prompt (I wish so..)
 
 ----
 
