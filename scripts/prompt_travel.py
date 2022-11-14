@@ -333,7 +333,7 @@ class Script(scripts.Script):
         if video_fps > 0 and len(images) > 1:
             try:
                 clip = ImageSequenceClip([np.asarray(t) for t in images], fps=video_fps)
-                clip.write_videofile(os.path.join(travel_path, f"travel-{travel_number:05}.mp4"), verbose=False, audio=False, logger=None)
+                clip.write_videofile(os.path.join(travel_path, f"travel-{travel_number:05}.mp4"), verbose=False, audio=False)
             except: pass
 
         return Processed(p, images, p.seed, info)
