@@ -23,7 +23,8 @@ now we do not modify on text char level, but do linear interpolating on the hidd
 
 ### How it works?
 
-- generate image one by one (batch configs are ignored)
+- input **multiple** lines in the prompt/negative-prompt box, each line is called a **stage**
+- generate images one by one, interpolating from one stage towards the next (batch configs are ignored)
 - gradually change the digested inputs between prompts
   - freeze all other settings (steps, sampler, cfg factor, rand seed, etc.)
 - export a video!
@@ -41,7 +42,8 @@ now we do not modify on text char level, but do linear interpolating on the hidd
 
 - prompt: (list of strings)
 - negative prompt: (list of strings)
-  - we call each line of prompt a stage
+  - input multiple lines of prompt text
+  - we call each line of prompt a stage, usually you need at least 2 lines of text to starts travel (unless in 'grad' mode)
   - if len(postive_prompts) != len(negative_prompts), the shorter one's last item will be repeated to match the longer one
 - mode: (categorical)
   - linear: interpolate linearly on condition/uncondition in latent space
