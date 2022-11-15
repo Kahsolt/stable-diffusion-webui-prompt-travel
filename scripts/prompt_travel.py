@@ -25,12 +25,18 @@ DEFAULT_GRAD_ITER      = 1
 DEFAULT_GRAD_METH      = 'clip'
 DEFAULT_GRAD_W_LATENT  = 1
 DEFAULT_GRAD_W_COND    = 1
-DEFAULT_FPS            = 10
+DEFAULT_VIDEO_FPS      = 10
+DEFAULT_VIDEO_FMT      = 'mp4'
+DEFAULT_VIDEO_PAD      = 0
+DEFAULT_VIDEO_PICK     = 1
+DEFAULT_VIDEO_NO_BAD   = False
+DEFAULT_VIDEO_RTRIM    = False
 DEFAULT_DEBUG          = True
 
 CHOICES_MODE          = ['linear', 'replace', 'grad']
 CHOICES_REPLACE_ORDER = ['random', 'most_similar', 'most_different', 'grad_min', 'grad_max']
 CHOICES_GRAD_METH     = ['clip', 'sign', 'tanh']
+CHOICES_VIDEO_FMT     = ['mp4', 'gif']
 
 T_tokens  = List[List[float]]
 T_weights = List[List[int]]
@@ -118,8 +124,8 @@ def process_images_cond_to_image(p: StableDiffusionProcessing, c, uc, prompts, s
         with devices.autocast():
             samples_ddim = p.sample(conditioning=c, unconditional_conditioning=uc, seeds=seeds, subseeds=subseeds, subseed_strength=p.subseed_strength, prompts=prompts)
 
-        samples_ddim = samples_ddim.to(devices.dtype_vae)
-        x_samples_ddim = decode_first_stage(p.sd_model, samples_ddim)
+        samples_ddim = samples_ddim.to(devices.dtype_vae)                   # [B=1, C=4, H=64,  W=64]
+        x_samples_ddim = decode_first_stage(p.sd_model, samples_ddim)       # [B=1, C=3, H=512, W=512]
         x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
         del samples_ddim
 
@@ -404,23 +410,51 @@ class Script(scripts.Script):
         return True
 
     def ui(self, is_img2img):
-        mode          = gr.Radio  (label='Travel mode',                         value=lambda: DEFAULT_MODE, choices=CHOICES_MODE)
-        steps         = gr.Textbox(label='Travel steps between stages',         value=lambda: DEFAULT_STEPS)
-        
-        replace_order = gr.Dropdown(label='Replace order (replace mode)',       value=lambda: DEFAULT_REPLACE_ORDER, choices=CHOICES_REPLACE_ORDER)
-        grad_alpha    = gr.Number  (label='Step size (grad mode)',              value=lambda: DEFAULT_GRAD_ALPHA)
-        grad_iter     = gr.Number  (label='Step count (grad mode)',             value=lambda: DEFAULT_GRAD_ITER, precision=0)
-        grad_meth     = gr.Dropdown(label='Step method (grad mode)',            value=lambda: DEFAULT_GRAD_METH, choices=CHOICES_GRAD_METH)
-        grad_w_latent = gr.Number  (label='Weight for latent match (grad/replace-grad mode)', value=lambda: DEFAULT_GRAD_W_LATENT)
-        grad_w_cond   = gr.Number  (label='Weight for cond match (grad/replace-grad mode)',   value=lambda: DEFAULT_GRAD_W_COND)
-        
-        video_fps     = gr.Number  (label='Video FPS',                          value=lambda: DEFAULT_FPS)
-        show_debug    = gr.Checkbox(label='Show verbose debug info at console', value=lambda: DEFAULT_DEBUG)
+        with gr.Group():
+            mode  = gr.Radio  (label='Travel mode',                 value=lambda: DEFAULT_MODE, choices=CHOICES_MODE)
+            steps = gr.Textbox(label='Travel steps between stages', value=lambda: DEFAULT_STEPS)
+    
+        with gr.Group(visible=False) as tab_replace:
+            replace_order = gr.Dropdown(label='Replace order', value=lambda: DEFAULT_REPLACE_ORDER, choices=CHOICES_REPLACE_ORDER)
+
+        with gr.Group(visible=False) as tab_grad:
+            with gr.Row():
+                grad_alpha = gr.Number(label='Step size',  value=lambda: DEFAULT_GRAD_ALPHA)
+                grad_iter  = gr.Number(label='Step count', value=lambda: DEFAULT_GRAD_ITER, precision=0)
+            with gr.Row():
+                grad_meth     = gr.Dropdown(label='Step method', value=lambda: DEFAULT_GRAD_METH, choices=CHOICES_GRAD_METH)
+                grad_w_latent = gr.Number  (label='Weight for latent match', value=lambda: DEFAULT_GRAD_W_LATENT)
+                grad_w_cond   = gr.Number  (label='Weight for cond match',   value=lambda: DEFAULT_GRAD_W_COND)
+
+        with gr.Group():
+            with gr.Row():
+                video_fmt  = gr.Dropdown(label='Video file format',    value=lambda: DEFAULT_VIDEO_FMT, choices=CHOICES_VIDEO_FMT)
+                video_fps  = gr.Number  (label='Video FPS',            value=lambda: DEFAULT_VIDEO_FPS)
+                video_pad  = gr.Number  (label='Pad begin/end frames', value=lambda: DEFAULT_VIDEO_PAD, precision=0)
+                video_pick = gr.Number  (label='Pick frames every n-th', value=lambda: DEFAULT_VIDEO_PICK, precision=0)
+
+        with gr.Group():
+            with gr.Row():
+                video_rtrim = gr.Checkbox(label='Video drop last frame', value=lambda: DEFAULT_VIDEO_RTRIM)
+                show_debug = gr.Checkbox(label='Show verbose debug info at console', value=lambda: DEFAULT_DEBUG)
+
+        def switch_mode(mode, replace_order):
+            requires_grad = mode == 'grad' or replace_order.startswith('grad')
+            show_replace  = mode == 'replace'
+            if mode == 'linear': requires_grad = show_replace = False
+            return [
+                { 'visible': show_replace,  '__type__': 'update' },
+                { 'visible': requires_grad, '__type__': 'update' },
+            ]
+
+        mode         .change(fn=switch_mode, inputs=[mode, replace_order], outputs=[tab_replace, tab_grad])
+        replace_order.change(fn=switch_mode, inputs=[mode, replace_order], outputs=[tab_replace, tab_grad])
 
         return [mode, steps, 
             replace_order,
             grad_alpha, grad_iter, grad_meth, grad_w_latent, grad_w_cond,
-            video_fps, show_debug]
+            video_fmt, video_fps, video_pad, video_pick, video_rtrim,
+            show_debug]
     
     def get_next_sequence_number(path):
         """ Determines and returns the next sequence number to use when saving an image in the specified directory. The sequence starts at 0. """
@@ -438,8 +472,15 @@ class Script(scripts.Script):
     def run(self, p:StableDiffusionProcessing, mode:str, steps:int, 
             replace_order: str,
             grad_alpha:float, grad_iter:int, grad_meth:str, grad_w_latent:float, grad_w_cond:float,
-            video_fps:int, show_debug:bool):
+            video_fmt:str, video_fps:float, video_pad:int, video_pick:int, video_rtrim:bool,
+            show_debug:bool):
         
+        # Param check
+        if grad_iter <= 0: return Processed(p, [], p.seed, 'grad_iter must > 0')
+        if video_pick < 1: return Processed(p, [], p.seed, 'video_pick must >= 1')
+        if video_pad  < 0: return Processed(p, [], p.seed, 'video_pad must >= 0')
+        if video_fps  < 0: return Processed(p, [], p.seed, 'video_fps must >= 0')
+
         # Prepare prompts
         prompt_pos = p.prompt.strip()
         if not prompt_pos: return Processed(p, [], p.seed, 'positive prompt should not be empty')
@@ -481,9 +522,7 @@ class Script(scripts.Script):
         p.batch_size = 1
 
         # Random unified const seed
-        p.seed             = get_fixed_seed(p.seed)
-        p.subseed          = p.seed
-        p.subseed_strength = 0.0
+        p.seed = get_fixed_seed(p.seed)
         if show_debug: print('seed:', p.seed)
 
         # Start job
@@ -498,8 +537,16 @@ class Script(scripts.Script):
         # Save video
         if video_fps > 0 and len(images) > 1:
             try:
-                clip = ImageSequenceClip([np.asarray(t) for t in images], fps=video_fps)
-                clip.write_videofile(os.path.join(self.log_dp, f"travel-{travel_number:05}.mp4"), verbose=False, audio=False)
+                seq = [np.asarray(t) for t in images]
+                if video_rtrim:    seq = seq[:-1]
+                if video_pad > 0:  seq = [seq[0]] * video_pad + seq + [seq[-1]] * video_pad
+                if video_pick > 1: seq = seq[::video_pick]
+                clip = ImageSequenceClip(seq, fps=video_fps)
+                fbase = os.path.join(self.log_dp, f"travel-{travel_number:05}")
+                if video_fmt == 'mp4':
+                    clip.write_videofile(fbase + '.mp4', verbose=False, audio=False)
+                elif video_fmt == 'gif':
+                    clip.write_gif(fbase + '.gif', loop=True)
             except NameError: pass
             except: print_exc()
 
@@ -546,6 +593,7 @@ class Script(scripts.Script):
         # travel through stages
         for i in range(1, n_stages):
             if state.interrupted: break
+            devices.torch_gc()
 
             # only change target prompts
             if show_debug:
@@ -557,14 +605,18 @@ class Script(scripts.Script):
             to_pos_hidden, to_neg_hidden, prompts, seeds, subseeds = process_images_prompt_to_cond(p)
 
             # Step 2: draw the interpolated images
+            is_break_iter = False
             n_inter = steps[i] + 1
             for t in range(1, n_inter):
-                if state.interrupted: break
+                if state.interrupted: is_break_iter = True ; break
+                devices.torch_gc()
 
                 alpha = t / n_inter     # [1/T, 2/T, .. T-1/T]
                 inter_pos_hidden = weighted_sum(from_pos_hidden, to_pos_hidden, alpha, kind='pos')
                 inter_neg_hidden = weighted_sum(from_neg_hidden, to_neg_hidden, alpha, kind='neg')
                 draw_by_cond(inter_pos_hidden, inter_neg_hidden, prompts, seeds, subseeds)
+
+            if is_break_iter: break
 
             # Step 3: draw the fianl stage
             draw_by_cond(to_pos_hidden, to_neg_hidden, prompts, seeds, subseeds)
@@ -600,6 +652,7 @@ class Script(scripts.Script):
         # travel between stages
         for i in range(1, n_stages):
             if state.interrupted: break
+            devices.torch_gc()
 
             # Step 2: draw the stage target
             if show_debug: print(f'[stage {i+1}/{n_stages}] prompts: {pos_prompts[i]}')
@@ -621,8 +674,10 @@ class Script(scripts.Script):
                     L1_dist      = F.l1_loss(source_embed, target_embed, reduction='none').squeeze(dim=0).mean(dim=-1).cpu().numpy()    # [T=75]
 
             # Step 3: draw the inter-mediums
+            is_break_step = False
             for _ in range(steps[i]):
-                if state.interrupted: break
+                if state.interrupted: is_break_step = True ; break
+                devices.torch_gc()
 
                 mask = np.asarray(c_tokens[0]) != np.asarray(tgt_c_tokens[0])   # [T=75]
                 n_replaces = sum(mask)
@@ -634,7 +689,6 @@ class Script(scripts.Script):
                 text_rev = token_to_text(clip_model, c_tokens)
                 log_fh.write(f'tokens: {text_rev}\n')
                 tokens = text_rev.split(' ')
-                n_tokens = len(tokens)
 
                 def _replace_tokens(sorted_indexes, c_tokens, tgt_c_tokens):
                     nonlocal mask, cnt
@@ -703,6 +757,8 @@ class Script(scripts.Script):
 
                 log_fh.write(f'\n')
 
+            if is_break_step: break
+
             # append the finishing image for current stage 
             images += [target_image]
 
@@ -740,6 +796,7 @@ class Script(scripts.Script):
         # travel between stages
         for i in range(1, n_stages):
             if state.interrupted: break
+            devices.torch_gc()
 
             # Step 2: draw the stage target
             if show_debug: print(f'[stage {i+1}/{n_stages}] prompts: {pos_prompts[i]}')
@@ -756,15 +813,19 @@ class Script(scripts.Script):
                 L1_dist       = F.l1_loss(source_cond, target_cond).item()
             
             # Step 3: draw the inter-mediums
+            is_break_step = False
             for _ in range(steps[i]):
-                if state.interrupted: break
+                if state.interrupted: is_break_step = True ; break
+                devices.torch_gc()
 
                 with devices.autocast():
                     current_cond = mlc_get_cond(c).unsqueeze(0).clone()  # [B=1, T=77, D=768]
 
                     # simple PGD attack on cond (src prompt) to match latent (dst image)
+                    is_break_iter = False
                     for _ in range(grad_iter):
-                        if state.interrupted: break
+                        if state.interrupted: is_break_iter = True ; break
+                        devices.torch_gc()
 
                         current_cond .requires_grad = True
                         target_cond  .requires_grad = True
@@ -800,6 +861,8 @@ class Script(scripts.Script):
                             log_fh.write('\n'.join(info))
                             log_fh.write('\n')
                             log_fh.flush()
+                    
+                    if is_break_iter: break
 
                 # move to new 'c' (one travel step!)
                 # FIXME: we do not walk on 'uc' so far
@@ -808,6 +871,8 @@ class Script(scripts.Script):
                 proc = process_images_cond_to_image(p, c, uc, prompts, seeds, subseeds)
                 if initial_info is None: initial_info = proc.info
                 images += proc.images
+
+            if is_break_step: break
 
             # append the finishing image for current stage 
             images += [target_image]

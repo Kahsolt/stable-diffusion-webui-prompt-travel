@@ -26,8 +26,7 @@ now we do not modify on text char level, but do linear interpolating on the hidd
 - generate image one by one (batch configs are ignored)
 - gradually change the digested inputs between prompts
   - freeze all other settings (steps, sampler, cfg factor, rand seed, etc.)
-  - force `subseed == seed, subseed_strength = 0.0`
-- gather to be a video!
+- export a video!
 
 **DDIM**:
 
@@ -94,7 +93,7 @@ Manual install:
 
 ### Experimental
 
-⚪ 'grad' mode
+⚪ grad mode
 
 The `loss_latent` optimizes `mse_loss(current_generated_latent, target_latent)` 
 
@@ -119,7 +118,7 @@ Grid search results: (`steps=100, grad_alpha=0.01, grad_iter=1, grad_meth='clip'
 
 ℹ NOTE: When 'prompt' has only single line, it will wander just **around** the init stage, dynamically balancing `loss_latent` and `loss_cond`; this allows you to discover neighbors of your given prompt 😀
 
-⚪ 'replace' mode
+⚪ replace mode
 
 This mode working on token embed input level, hence your can view `log.txt` to see how your input tokens are gradually changed.  
 ⚠ Remeber that comma is a normal valid token, so you might see many commas there. However, they are different when appearing at different positions within the token sequence.  
