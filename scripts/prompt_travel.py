@@ -522,8 +522,11 @@ class Script(scripts.Script):
         p.batch_size = 1
 
         # Random unified const seed
-        p.seed = get_fixed_seed(p.seed)
-        if show_debug: print('seed:', p.seed)
+        p.seed = get_fixed_seed(p.seed)     # fix it to assure all processes using the same major seed
+        self.subseed = p.subseed            # stash it to allow using random subseed for each process
+        if show_debug:
+            print('seed:',    p.seed)
+            print('subseed:', p.subseed)
 
         # Start job
         state.job_count = count
@@ -587,6 +590,7 @@ class Script(scripts.Script):
             print(f'  neg prompts: {neg_prompts[0]}')
         p.prompt           = pos_prompts[0]
         p.negative_prompt  = neg_prompts[0]
+        p.subseed          = self.subseed
         from_pos_hidden, from_neg_hidden, prompts, seeds, subseeds = process_images_prompt_to_cond(p)
         draw_by_cond(from_pos_hidden, from_neg_hidden, prompts, seeds, subseeds)
         
@@ -602,6 +606,7 @@ class Script(scripts.Script):
                 print(f'  neg prompts: {neg_prompts[i]}')
             p.prompt           = pos_prompts[i]
             p.negative_prompt  = neg_prompts[i]
+            p.subseed          = self.subseed
             to_pos_hidden, to_neg_hidden, prompts, seeds, subseeds = process_images_prompt_to_cond(p)
 
             # Step 2: draw the interpolated images
@@ -635,6 +640,7 @@ class Script(scripts.Script):
         # Step 1: draw init image
         if show_debug: print(f'[stage 1/{n_stages}] prompts: {pos_prompts[0]}')
         p.prompt = pos_prompts[0]
+        p.subseed = self.subseed
         c, uc, prompts, seeds, subseeds, (c_tokens, c_weights, uc_tokens, uc_weights) = process_images_prompt_to_cond(p, ret_token_and_weight=True)
         proc = process_images_cond_to_image(p, c, uc, prompts, seeds, subseeds)
         if initial_info is None: initial_info = proc.info
@@ -657,6 +663,7 @@ class Script(scripts.Script):
             # Step 2: draw the stage target
             if show_debug: print(f'[stage {i+1}/{n_stages}] prompts: {pos_prompts[i]}')
             p.prompt = pos_prompts[i]
+            p.subseed = self.subseed
             *params, (tgt_c_tokens, tgt_c_weights, tgt_uc_tokens, tgt_uc_weights) = process_images_prompt_to_cond(p, ret_token_and_weight=True)
             _, _, used_custom_terms, hijack_comments, hijack_fixes, _ = text_to_token(clip_model, [p.prompt])
             proc = process_images_cond_to_image(p, *params)
@@ -779,6 +786,7 @@ class Script(scripts.Script):
         # Step 1: draw init image
         if show_debug: print(f'[stage 1/{n_stages}] prompts: {pos_prompts[0]}')
         p.prompt = pos_prompts[0]
+        p.subseed = self.subseed
         c, uc, prompts, seeds, subseeds = process_images_prompt_to_cond(p)
         proc = process_images_cond_to_image(p, c, uc, prompts, seeds, subseeds)
         if initial_info is None: initial_info = proc.info
@@ -801,6 +809,7 @@ class Script(scripts.Script):
             # Step 2: draw the stage target
             if show_debug: print(f'[stage {i+1}/{n_stages}] prompts: {pos_prompts[i]}')
             p.prompt = pos_prompts[i]
+            p.subseed = self.subseed
             params = process_images_prompt_to_cond(p)
             proc = process_images_cond_to_image(p, *params)
             if initial_info is None: initial_info = proc.info

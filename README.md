@@ -26,7 +26,8 @@ now we do not modify on text char level, but do linear interpolating on the hidd
 - input **multiple** lines in the prompt/negative-prompt box, each line is called a **stage**
 - generate images one by one, interpolating from one stage towards the next (batch configs are ignored)
 - gradually change the digested inputs between prompts
-  - freeze all other settings (steps, sampler, cfg factor, rand seed, etc.)
+  - freeze all other settings (`steps`, `sampler`, `cfg factor`, `seed`, etc.)
+  - note that only the major `seed` will be forcely fixed through all processes, you can still set `subseed = -1` to allow more variances
 - export a video!
 
 **DDIM**:
@@ -72,8 +73,12 @@ now we do not modify on text char level, but do linear interpolating on the hidd
     - `tanh`: significantly speed down when approching (it takes infinite time to exactly reach...)
   - grad_w_latent: (float), weight factor of `loss_latent`
   - grad_w_cond: (float), weight factor of `loss_cond`
-- fps: (float)
-  - FPS of video, set `0` to disable saving
+- video_*
+  - fps: (float), FPS of video, set `0` to disable file saving
+  - fmt: (categorical), export video file format
+  - pad: (int), repeat beginning/ending frames, giving a in/out time
+  - pick_nth: (int), pick every n-th frames (e.g.: set `2` to avoid non-converging ping-pong phenomenon)
+  - drop_last: (bool), exlude last frame in video (it may be a bad image when interrupted)
 - debug: (bool)
   - whether show verbose debug info at console
 
