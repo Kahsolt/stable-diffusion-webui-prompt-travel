@@ -15,23 +15,24 @@ except ImportError: print(f"package moviepy not installed, will not be able to g
 import modules.scripts as scripts
 from modules.processing import Processed, StableDiffusionProcessing
 from modules.prompt_parser import ScheduledPromptConditioning, MulticondLearnedConditioning
-from modules.shared import state
+from modules.shared import state, opts
 
-DEFAULT_MODE           = 'linear'
-DEFAULT_STEPS          = 30
-DEFAULT_REPLACE_ORDER  = 'grad_min'
-DEFAULT_GRAD_ALPHA     = 0.01
-DEFAULT_GRAD_ITER      = 1
-DEFAULT_GRAD_METH      = 'clip'
-DEFAULT_GRAD_W_LATENT  = 1
-DEFAULT_GRAD_W_COND    = 1
-DEFAULT_VIDEO_FPS      = 10
-DEFAULT_VIDEO_FMT      = 'mp4'
-DEFAULT_VIDEO_PAD      = 0
-DEFAULT_VIDEO_PICK     = 1
-DEFAULT_VIDEO_NO_BAD   = False
-DEFAULT_VIDEO_RTRIM    = False
-DEFAULT_DEBUG          = True
+__ = lambda key, value=None: opts.data.get(f'customscript/prompt_travel.py/txt2img/{key}/value', value)
+
+DEFAULT_MODE           = __('Travel mode', 'linear')
+DEFAULT_STEPS          = __('Travel steps between stages', 30)
+DEFAULT_REPLACE_ORDER  = __('Replace order', 'grad_min')
+DEFAULT_GRAD_ALPHA     = __('Step size', 0.01)
+DEFAULT_GRAD_ITER      = __('Step count', 1)
+DEFAULT_GRAD_METH      = __('Step method', 'clip')
+DEFAULT_GRAD_W_LATENT  = __('Weight for latent match', 1)
+DEFAULT_GRAD_W_COND    = __('Weight for cond match', 1)
+DEFAULT_VIDEO_FPS      = __('Video FPS', 10)
+DEFAULT_VIDEO_FMT      = __('Video file format', 'mp4')
+DEFAULT_VIDEO_PAD      = __('Pad begin/end frames', 0)
+DEFAULT_VIDEO_PICK     = __('Pick every n-th frame', 1)
+DEFAULT_VIDEO_RTRIM    = __('Video drop last frame', False)
+DEFAULT_DEBUG          = __('Show console debug', True)
 
 CHOICES_MODE          = ['linear', 'replace', 'grad']
 CHOICES_REPLACE_ORDER = ['random', 'most_similar', 'most_different', 'grad_min', 'grad_max']
@@ -50,7 +51,7 @@ import numpy as np
 from PIL import Image
 
 import modules.sd_hijack
-from modules import devices, prompt_parser, lowvram
+from modules import devices, lowvram
 from modules.sd_hijack import model_hijack
 from modules.shared import opts, cmd_opts, state
 import modules.shared as shared
@@ -428,15 +429,15 @@ class Script(scripts.Script):
 
         with gr.Group():
             with gr.Row():
-                video_fmt  = gr.Dropdown(label='Video file format',    value=lambda: DEFAULT_VIDEO_FMT, choices=CHOICES_VIDEO_FMT)
-                video_fps  = gr.Number  (label='Video FPS',            value=lambda: DEFAULT_VIDEO_FPS)
-                video_pad  = gr.Number  (label='Pad begin/end frames', value=lambda: DEFAULT_VIDEO_PAD, precision=0)
-                video_pick = gr.Number  (label='Pick frames every n-th', value=lambda: DEFAULT_VIDEO_PICK, precision=0)
+                video_fmt  = gr.Dropdown(label='Video file format',     value=lambda: DEFAULT_VIDEO_FMT, choices=CHOICES_VIDEO_FMT)
+                video_fps  = gr.Number  (label='Video FPS',             value=lambda: DEFAULT_VIDEO_FPS)
+                video_pad  = gr.Number  (label='Pad begin/end frames',  value=lambda: DEFAULT_VIDEO_PAD,  precision=0)
+                video_pick = gr.Number  (label='Pick every n-th frame', value=lambda: DEFAULT_VIDEO_PICK, precision=0)
 
         with gr.Group():
             with gr.Row():
                 video_rtrim = gr.Checkbox(label='Video drop last frame', value=lambda: DEFAULT_VIDEO_RTRIM)
-                show_debug = gr.Checkbox(label='Show verbose debug info at console', value=lambda: DEFAULT_DEBUG)
+                show_debug = gr.Checkbox(label='Show console debug', value=lambda: DEFAULT_DEBUG)
 
         def switch_mode(mode, replace_order):
             requires_grad = mode == 'grad' or replace_order.startswith('grad')
