@@ -16,6 +16,7 @@ now we do not modify on text char level, but do linear interpolating on the hidd
 
 ### Change Log
 
+- 2022/11/20: keep up with webui's updates
 - 2022/11/14: walk by substituting token embedding ('replace' mode)
 - 2022/11/13: walk by optimizing condition ('grad' mode)
 - 2022/11/10: interpolate linearly  on condition/uncondition ('linear' mode)

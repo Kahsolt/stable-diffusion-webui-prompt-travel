@@ -34,17 +34,17 @@ DEFAULT_VIDEO_PICK     = __('Pick every n-th frame', 1)
 DEFAULT_VIDEO_RTRIM    = __('Video drop last frame', False)
 DEFAULT_DEBUG          = __('Show console debug', True)
 
-CHOICES_MODE          = ['linear', 'replace', 'grad']
-CHOICES_REPLACE_ORDER = ['random', 'most_similar', 'most_different', 'grad_min', 'grad_max']
-CHOICES_GRAD_METH     = ['clip', 'sign', 'tanh']
-CHOICES_VIDEO_FMT     = ['mp4', 'gif']
+CHOICES_MODE           = ['linear', 'replace', 'grad']
+CHOICES_REPLACE_ORDER  = ['random', 'most_similar', 'most_different', 'grad_min', 'grad_max']
+CHOICES_GRAD_METH      = ['clip', 'sign', 'tanh']
+CHOICES_VIDEO_FMT      = ['mp4', 'gif']
 
 T_tokens  = List[List[float]]
 T_weights = List[List[int]]
 
 # ↓↓↓ the following is modified from 'modules/processing.py' ↓↓↓
 
-from modules.processing import apply_overlay, apply_color_correction, create_infotext, decode_first_stage, get_fixed_seed
+from modules.processing import create_infotext, decode_first_stage, get_fixed_seed
 
 import torch
 import numpy as np
@@ -62,11 +62,10 @@ import modules.styles
 def process_images_prompt_to_cond(p: StableDiffusionProcessing, ret_token_and_weight=False) -> tuple:
     """this is the main loop that both txt2img and img2img use; it calls func_init once inside all the scopes and func_sample once per batch"""
 
-    assert p.prompt is not None
-
-    with open(os.path.join(shared.script_path, "params.txt"), "w", encoding="utf8") as file:
-        processed = Processed(p, [], p.seed, "")
-        file.write(processed.infotext(p, 0))
+    if type(p.prompt) == list:
+        assert(len(p.prompt) > 0)
+    else:
+        assert p.prompt is not None
 
     devices.torch_gc()
 
@@ -76,11 +75,31 @@ def process_images_prompt_to_cond(p: StableDiffusionProcessing, ret_token_and_we
     modules.sd_hijack.model_hijack.apply_circular(p.tiling)
     modules.sd_hijack.model_hijack.clear_comments()
 
-    shared.prompt_styles.apply_styles(p)
+    comments = {}
 
-    p.all_prompts  = p.batch_size * 1 * [p.prompt]
-    p.all_seeds    = [int(seed) + (x if p.subseed_strength == 0 else 0) for x in range(len(p.all_prompts))]
-    p.all_subseeds = [int(subseed) + x for x in range(len(p.all_prompts))]
+    if type(p.prompt) == list:
+        p.all_prompts = [shared.prompt_styles.apply_styles_to_prompt(x, p.styles) for x in p.prompt]
+    else:
+        p.all_prompts = p.batch_size * p.n_iter * [shared.prompt_styles.apply_styles_to_prompt(p.prompt, p.styles)]
+
+    if type(p.negative_prompt) == list:
+        p.all_negative_prompts = [shared.prompt_styles.apply_negative_styles_to_prompt(x, p.styles) for x in p.negative_prompt]
+    else:
+        p.all_negative_prompts = p.batch_size * p.n_iter * [shared.prompt_styles.apply_negative_styles_to_prompt(p.negative_prompt, p.styles)]
+
+    if type(seed) == list:
+        p.all_seeds = seed
+    else:
+        p.all_seeds = [int(seed) + (x if p.subseed_strength == 0 else 0) for x in range(len(p.all_prompts))]
+
+    if type(subseed) == list:
+        p.all_subseeds = subseed
+    else:
+        p.all_subseeds = [int(subseed) + x for x in range(len(p.all_prompts))]
+
+    with open(os.path.join(shared.script_path, "params.txt"), "w", encoding="utf8") as file:
+        processed = Processed(p, [], p.seed, "")
+        file.write(processed.infotext(p, 0))
 
     if os.path.exists(cmd_opts.embeddings_dir) and not p.do_not_reload_embeddings:
         model_hijack.embedding_db.load_textual_inversion_embeddings()
@@ -93,20 +112,32 @@ def process_images_prompt_to_cond(p: StableDiffusionProcessing, ret_token_and_we
             p.init(p.all_prompts, p.all_seeds, p.all_subseeds)
 
         if state.job_count == -1:
-            state.job_count = 1
+            state.job_count = p.n_iter
 
-        n = 0       # batch count for legacy compatible
-        prompts  = p.all_prompts [n * p.batch_size : (n + 1) * p.batch_size]
-        seeds    = p.all_seeds   [n * p.batch_size : (n + 1) * p.batch_size]
-        subseeds = p.all_subseeds[n * p.batch_size : (n + 1) * p.batch_size]
+        if state.skipped:
+            state.skipped = False
+        
+        if state.interrupted:
+            return
+
+        n = 0
+        prompts = p.all_prompts[n * p.batch_size:(n + 1) * p.batch_size]
+        negative_prompts = p.all_negative_prompts[n * p.batch_size:(n + 1) * p.batch_size]
+        seeds = p.all_seeds[n * p.batch_size:(n + 1) * p.batch_size]
+        subseeds = p.all_subseeds[n * p.batch_size:(n + 1) * p.batch_size]
+
+        if len(prompts) == 0:
+            return
 
         if hasattr(p, 'scripts') and p.scripts is not None:
             p.scripts.process_batch(p, batch_number=n, prompts=prompts, seeds=seeds, subseeds=subseeds)
 
         with devices.autocast():
             # 'prompt string' => tensor([T, D])
-            uc, uc_tokens, uc_weights = get_learned_conditioning(shared.sd_model, len(prompts) * [p.negative_prompt], p.steps)
+            uc, uc_tokens, uc_weights = get_learned_conditioning(shared.sd_model, negative_prompts, p.steps)
             c, c_tokens, c_weights = get_multicond_learned_conditioning(shared.sd_model, prompts, p.steps)
+
+        devices.torch_gc()
 
         if ret_token_and_weight:
             return c, uc, prompts, seeds, subseeds, (c_tokens, c_weights, uc_tokens, uc_weights)
@@ -154,15 +185,6 @@ def process_images_cond_to_image(p: StableDiffusionProcessing, c, uc, prompts, s
 
             image = Image.fromarray(x_sample)
 
-            if p.color_corrections is not None and i < len(p.color_corrections):
-                if opts.save and not p.do_not_save_samples and opts.save_images_before_color_correction:
-                    image_without_cc = apply_overlay(image, p.paste_to, i, p.overlay_images)
-                    images.save_image(image_without_cc, p.outpath_samples, "", seeds[i], prompts[i], opts.samples_format, 
-                                      info=infotext(n, i), p=p, suffix="-before-color-correction")
-                image = apply_color_correction(p.color_corrections[i], image)
-
-            image = apply_overlay(image, p.paste_to, i, p.overlay_images)
-
             if opts.samples_save and not p.do_not_save_samples:
                 images.save_image(image, p.outpath_samples, "", seeds[i], prompts[i], opts.samples_format, info=infotext(n, i), p=p)
 
@@ -175,8 +197,6 @@ def process_images_cond_to_image(p: StableDiffusionProcessing, c, uc, prompts, s
 
         devices.torch_gc()
         state.nextjob()
-
-        p.color_corrections = None
 
     devices.torch_gc()
 
