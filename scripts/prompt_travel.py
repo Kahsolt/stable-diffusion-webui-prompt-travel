@@ -505,13 +505,13 @@ class Script(scripts.Script):
         # Prepare prompts
         prompt_pos = p.prompt.strip()
         if not prompt_pos: return Processed(p, [], p.seed, 'positive prompt should not be empty')
-        pos_prompts = prompt_pos.split('\n')
+        pos_prompts = [p.strip() for p in prompt_pos.split('\n') if p.strip()]
         if len(pos_prompts) == 1:
             # NOTE: if only single stage specified, we double it to allow wandering around :)
             if mode == 'grad': pos_prompts = pos_prompts * 2
             else: return Processed(p, [], p.seed, 'should specify at least two lines of prompt to travel between')
         prompt_neg = p.negative_prompt.strip()
-        neg_prompts = prompt_neg.split('\n')
+        neg_prompts = [p.strip() for p in prompt_neg.split('\n') if p.strip()]
         n_stages = max(len(pos_prompts), len(neg_prompts))
         while len(pos_prompts) < n_stages: pos_prompts.append(pos_prompts[-1])
         while len(neg_prompts) < n_stages: neg_prompts.append(neg_prompts[-1])
