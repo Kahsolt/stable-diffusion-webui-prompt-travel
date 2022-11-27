@@ -4,8 +4,8 @@
 
 ----
 
-This is the more human-sensible version of [stable-diffusion-webui-prompt-erosion](https://github.com/Kahsolt/stable-diffusion-webui-prompt-erosion), 
-now we do not modify on text char level, but do linear interpolating on the hidden embedded vectors. 😀  
+This is the sister repo of [stable-diffusion-webui-sonar](https://github.com/Kahsolt/stable-diffusion-webui-sonar), 
+we do various interpolating on the hidden embedded vectors to make seemingly-continous images sequences. 😀  
 
 ⚠ 我们成立了插件反馈 QQ 群: 616795645 (赤狐屿)，欢迎出建议、意见、报告bug等 (w  
 ⚠ We have a QQ chat group now: 616795645, any suggeustions, discussions and bug reports are highly wellllcome !!  
