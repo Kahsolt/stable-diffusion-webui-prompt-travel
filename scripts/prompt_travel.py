@@ -261,7 +261,7 @@ def get_multicond_learned_conditioning(model, prompts, steps) -> Tuple[Multicond
 
 # ↓↓↓ the following is modified from 'ldm.models.diffusion/ddpm.py' ↓↓↓
 
-from modules.sd_hijack import FrozenCLIPEmbedderWithCustomWords
+#from modules.sd_hijack_clip import FrozenCLIPEmbedderWithCustomWordsBase
 #from ldm.models.diffusion import LatentDiffusion
 #from ldm.modules.distributions.distributions import DiagonalGaussianDistribution
 
@@ -300,7 +300,7 @@ def get_latent_loss(sd_model, latent:torch.Tensor, cond:torch.Tensor) -> torch.T
 
     return loss                                                     # [B=1, C=4, H=64, W=64]
 
-def text_to_token(self:FrozenCLIPEmbedderWithCustomWords, text:List[str]) -> tuple:
+def text_to_token(self, text:List[str]) -> tuple:
     # FrozenCLIPEmbedderWithCustomWords.FrozenCLIPEmbedder.CLIPTokenizer
 
     with devices.autocast('cuda'):
@@ -311,7 +311,7 @@ def text_to_token(self:FrozenCLIPEmbedderWithCustomWords, text:List[str]) -> tup
     
     return batch_multipliers, remade_batch_tokens, used_custom_terms, hijack_comments, hijack_fixes, token_count
 
-def token_to_cond(self:FrozenCLIPEmbedderWithCustomWords, batch_multipliers:T_weights, remade_batch_tokens:T_tokens, used_custom_terms, hijack_comments, hijack_fixes) -> torch.Tensor:
+def token_to_cond(self, batch_multipliers:T_weights, remade_batch_tokens:T_tokens, used_custom_terms, hijack_comments, hijack_fixes) -> torch.Tensor:
     self.hijack.comments += hijack_comments
 
     if len(used_custom_terms) > 0:
@@ -357,7 +357,7 @@ def token_to_cond(self:FrozenCLIPEmbedderWithCustomWords, batch_multipliers:T_we
 
     return z
 
-def token_to_text(self:FrozenCLIPEmbedderWithCustomWords, tokens:T_tokens) -> str:
+def token_to_text(self, tokens:T_tokens) -> str:
     id_2_word = { v: k for k, v in self.wrapped.tokenizer.get_vocab().items() }
 
     words = []
@@ -369,7 +369,7 @@ def token_to_text(self:FrozenCLIPEmbedderWithCustomWords, tokens:T_tokens) -> st
 
     return ' '.join(words)
 
-def FrozenCLIPEmbedderWithCustomWords_forward(self:FrozenCLIPEmbedderWithCustomWords, text:List[str]) -> Tuple[torch.Tensor, T_tokens, T_weights]:
+def FrozenCLIPEmbedderWithCustomWords_forward(self, text:List[str]) -> Tuple[torch.Tensor, T_tokens, T_weights]:
     batch_multipliers, remade_batch_tokens, used_custom_terms, hijack_comments, hijack_fixes, token_count = text_to_token(self, text)
     cond = token_to_cond(self, batch_multipliers, remade_batch_tokens, used_custom_terms, hijack_comments, hijack_fixes)
 
