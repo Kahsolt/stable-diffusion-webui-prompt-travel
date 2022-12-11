@@ -1,14 +1,25 @@
 # stable-diffusion-webui-prompt-travel
 
-    Extension script for AUTOMATIC1111/stable-diffusion-webui to travel between prompts in latent space.
+    Travel between prompts in the latent space to make pseudo-animation, extension script for AUTOMATIC1111/stable-diffusion-webui.
 
 ----
 
-This is the sister repo of [stable-diffusion-webui-sonar](https://github.com/Kahsolt/stable-diffusion-webui-sonar), 
-we do various interpolating on the hidden embedded vectors to make seemingly-continous images sequences. 😀  
+<p align="left">
+  <a href="https://github.com/Kahsolt/stable-diffusion-webui-prompt-travel/commits"><img alt="Last Commit" src="https://img.shields.io/github/last-commit/Kahsolt/stable-diffusion-webui-prompt-travel"></a>
+  <a href="https://github.com/Kahsolt/stable-diffusion-webui-prompt-travel/issues"><img alt="GitHub issues" src="https://img.shields.io/github/issues/Kahsolt/stable-diffusion-webui-prompt-travel"></a>
+  <a href="https://github.com/Kahsolt/stable-diffusion-webui-prompt-travel/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/Kahsolt/stable-diffusion-webui-prompt-travel"></a>
+  <a href="https://github.com/Kahsolt/stable-diffusion-webui-prompt-travel/network"><img alt="GitHub forks" src="https://img.shields.io/github/forks/Kahsolt/stable-diffusion-webui-prompt-travel"></a>
+  <img alt="Language" src="https://img.shields.io/github/languages/top/Kahsolt/stable-diffusion-webui-prompt-travel">
+  <img alt="License" src="https://img.shields.io/github/license/Kahsolt/stable-diffusion-webui-prompt-travel">
+  <br/>
+</p>
+
+![:stable-diffusion-webui-prompt-travel](https://count.getloli.com/get/@:stable-diffusion-webui-prompt-travel)
+
+Try interpolating on the hidden vectors of conditioning prompt to make seemingly-continuous image sequence, or let's say a pseudo-animation. 😀  
 
 ⚠ 我们成立了插件反馈 QQ 群: 616795645 (赤狐屿)，欢迎出建议、意见、报告bug等 (w  
-⚠ We have a QQ chat group now: 616795645, any suggeustions, discussions and bug reports are highly wellllcome !!  
+⚠ We have a QQ chat group (616795645) now, any suggestions, discussions and bug reports are highly wellllcome!!  
 
 ℹ 实话不说，我想有可能通过这个来做ppt童话绘本<del>甚至本子</del>……  
 ℹ 聪明的用法：先手工盲搜两张好看的图 (只有prompt差异)，然后再尝试在其间 travel :lolipop:  
@@ -18,9 +29,10 @@ we do various interpolating on the hidden embedded vectors to make seemingly-con
 
 ⚪ Features
 
+- 2022/12/11: work in a more 'successive' way, idea borrowed from [deforum](https://github.com/deforum-art/deforum-for-automatic1111-webui) ('genesis' option)
 - 2022/11/14: walk by substituting token embedding ('replace' mode)
 - 2022/11/13: walk by optimizing condition ('grad' mode)
-- 2022/11/10: interpolate linearly  on condition/uncondition ('linear' mode)
+- 2022/11/10: interpolate linearly on condition/uncondition ('linear' mode)
 
 ⚪ Fixups
 
@@ -30,20 +42,49 @@ we do various interpolating on the hidden embedded vectors to make seemingly-con
 
 ### How it works?
 
-- input **multiple** lines in the prompt/negative-prompt box, each line is called a **stage**
+- input **multiple lines** in the prompt/negative-prompt box, each line is called a **stage**
 - generate images one by one, interpolating from one stage towards the next (batch configs are ignored)
 - gradually change the digested inputs between prompts
   - freeze all other settings (`steps`, `sampler`, `cfg factor`, `seed`, etc.)
   - note that only the major `seed` will be forcely fixed through all processes, you can still set `subseed = -1` to allow more variances
 - export a video!
 
-**DDIM**:
+⚪ Txt2Img
 
-![DDIM](img/ddim.gif)
+| sampler \ genesis | fixed | successive |
+| :-: | :-: | :-: |
+| Eular a | ![t2i-f-eular_a](img/t2i-f-eular_a.gif) | ![t2i-s-eular_a](img/t2i-s-eular_a.gif) |
+| DDIM    | ![t2i-f-ddim](img/t2i-f-ddim.gif)       | ![t2i-s-ddim](img/t2i-s-ddim.gif)       |
 
-**Eular a**:
+⚪ Img2Img
 
-![eular_a](img/eular_a.gif)
+| sampler \ genesis | fixed | successive |
+| :-: | :-: | :-: |
+| Eular a | ![i2i-f-eular_a](img/i2i-f-eular_a.gif) | ![i2i-s-eular_a](img/i2i-s-eular_a.gif) |
+| DDIM    | ![i2i-f-ddim](img/i2i-f-ddim.gif)       | ![i2i-s-ddim](img/i2i-s-ddim.gif)       |
+
+Reference image for img2img:
+
+![i2i-ref](img/i2i-ref.png)
+
+Example above run configure ('linear' mode):
+
+```
+Prompt:
+(((masterpiece))), highres, ((boy)), child, cat ears, white hair, red eyes, yellow bell, red cloak, barefoot, angel, [flying], egyptian
+((masterpiece)), highres, ((girl)), loli, cat ears, light blue hair, red eyes, magical wand, barefoot, [running]
+
+Negative prompt:
+(((nsfw))), ugly,duplicate,morbid,mutilated,tranny,trans,trannsexual,mutation,deformed,long neck,bad anatomy,bad proportions,extra arms,extra legs, disfigured,more than 2 nipples,malformed,mutated,hermaphrodite,out of frame,extra limbs,missing arms,missing legs,poorly drawn hands,poorty drawn face,mutation,poorly drawn,long body,multiple breasts,cloned face,gross proportions, mutated hands,bad hands,bad feet,long neck,missing limb,malformed limbs,malformed hands,fused fingers,too many fingers,extra fingers,missing fingers,extra digit,fewer digits,mutated hands and fingers,lowres,text,error,cropped,worst quality,low quality,normal quality,jpeg artifacts,signature,watermark,username,blurry,text font ufemale focus, poorly drawn, deformed, poorly drawn face, (extra leg:1.3), (extra fingers:1.2),out of frame
+
+Steps: 15
+CFG scale: 7
+Clip skip: 1
+Seed: 114514
+Size: 512 x 512
+Model hash: 925997e9
+Hypernet: (this is my secret :)
+```
 
 
 ### Options
@@ -52,21 +93,25 @@ we do various interpolating on the hidden embedded vectors to make seemingly-con
 - negative prompt: (list of strings)
   - input multiple lines of prompt text
   - we call each line of prompt a stage, usually you need at least 2 lines of text to starts travel (unless in 'grad' mode)
-  - if len(postive_prompts) != len(negative_prompts), the shorter one's last item will be repeated to match the longer one
+  - if len(positive_prompts) != len(negative_prompts), the shorter one's last item will be repeated to match the longer one
 - mode: (categorical)
-  - linear: interpolate linearly on condition/uncondition in latent space
-  - replace: walk by gradually substituting word embededings 
-  - grad: walk by optimizing certain loss
+  - `linear`: interpolate linearly on condition/uncondition in latent space
+  - `replace`: walk by gradually substituting word embeddings 
+  - `grad`: walk by optimizing certain loss
   - NOTE: `walk` methods might not reach target stages in specified steps some times, or reached earlier than expect, in that case, manually tune `grad_alpha` and `steps`  might help a little...
 - steps: (int, list of int)
-  - number of images to interpolate between two successive stages
+  - number of images to interpolate between two stages
   - if int, constant number of travel steps
   - if list of int, length should match `len(stages)-1`, separate by comma, e.g.: `12, 24, 36`
+- genesis: (categorical), the a prior for each image frame
+  - `fixed`: starts from pure noise in txt2img pipeline, or from the same ref-image given in img2img pipeline
+  - `successive`: starts from the last generated image (this will force txt2img turn to actually be img2img from the 2nd frame on)
+- denoise_strength: (float), denoise strength in img2img pipelines when `genesis == 'successive'`
 - replace_*
   - replace_order: (categorical)
     - `random`: substitute tokens randomly
-    - `similiar`: substitute most similiar tokens first (L1 distance of token embeddings)
-    - `different`: substitute most diffrent tokens first
+    - `similiar`: substitute most similar tokens first (L1 distance of token embeddings)
+    - `different`: substitute most different tokens first
     - `grad_min`: substitute tokens that causing smallest gradient first (gradient settings same as in `grad` mode)
     - `grad_max`: substitute tokens that causing largest gradient first
 - grad_*
@@ -76,20 +121,19 @@ we do various interpolating on the hidden embedded vectors to make seemingly-con
     - might be more cautious (perhaps!), but definitely takes more time
   - grad_meth: (categorical), step function of a walk pace
     - `clip`: a triky balance between `sign` and `tanh`
-    - `sign`: walk at a constant speed (often stucks into oscillation at the end)
-    - `tanh`: significantly speed down when approching (it takes infinite time to exactly reach...)
+    - `sign`: walk at a constant speed (often stuck into oscillation at the end)
+    - `tanh`: significantly speed down when approaching (it takes infinite time to exactly reach...)
   - grad_w_latent: (float), weight factor of `loss_latent`
   - grad_w_cond: (float), weight factor of `loss_cond`
 - video_*
   - fps: (float), FPS of video, set `0` to disable file saving
   - fmt: (categorical), export video file format
   - pad: (int), repeat beginning/ending frames, giving a in/out time
-  - pick_nth: (int), pick every n-th frames (e.g.: set `2` to avoid non-converging ping-pong phenomenon)
-  - drop_last: (bool), exlude last frame in video (it may be a bad image when interrupted)
+  - pick: (string), cherry pick frames by [python slice syntax](https://www.pythoncentral.io/how-to-slice-listsarrays-and-tuples-in-python) before padding (e.g.: set `::2` to avoid non-converging ping-pong phenomenon, set `:-1` to drop non-reaching last frame)
 - debug: (bool)
   - whether show verbose debug info at console
 
-⚠ this script will NOT support the schedule syntax (i.e.: `[prompt:prompt:number]`), because I don't know how to interpolate between different schedule plans :(  
+⚠ this script will NOT probably support the schedule syntax (i.e.: `[prompt:prompt:number]`), because I don't know how to interpolate between different schedule plans :(  
 ⚠ max length diff for each prompts should NOT exceed `75` in token count, otherwise will only work on the first segment, cos' I also don't know how to interpolate between different-lengthed tensors 🤔  
 
 
@@ -130,14 +174,22 @@ Grid search results: (`steps=100, grad_alpha=0.01, grad_iter=1, grad_meth='clip'
 (*) 上表如无特殊说明，其各项 loss 变化都符合设置的优化方向  
 (**) 我们似乎应当总是令 `w_latent > 0`，而 `w_cond` 的设置似乎很玄学，这里可能遭遇了对抗样本现象(神经网络的过度线性性)……  
 
-ℹ NOTE: When 'prompt' has only single line, it will wander just **around** the init stage, dynamically balancing `loss_latent` and `loss_cond`; this allows you to discover neighbors of your given prompt 😀
+ℹ NOTE: When 'prompt' has only single line, it will wander just **around** the initial stage, dynamically balancing `loss_latent` and `loss_cond`; this allows you to discover neighbors of your given prompt 😀
 
 ⚪ replace mode
 
 This mode working on token embed input level, hence your can view `log.txt` to see how your input tokens are gradually changed.  
-⚠ Remeber that comma is a normal valid token, so you might see many commas there. However, they are different when appearing at different positions within the token sequence.  
+⚠ Remember that comma is a normal valid token, so you might see many commas there. However, they are different when appearing at different positions within the token sequence.  
 
-The actual token replacing order might reveal some information of the token importances, might the listed '>> grad ascend' or '>> embed L1-distance ascend' give you some ideas to tune your input prompt (I wish so..)
+The actual token replacing order might reveal some information of the token importance, might the listed '>> grad ascend' or '>> embed L1-distance ascend' give you some ideas to tune your input prompt (I wish so..)
+
+
+
+
+### Related Projects
+
+- deforum (2D/3D animation): [https://github.com/deforum-art/deforum-for-automatic1111-webui](https://github.com/deforum-art/deforum-for-automatic1111-webui)
+- sonar (k_diffuison samplers): [https://github.com/Kahsolt/stable-diffusion-webui-sonar](https://github.com/Kahsolt/stable-diffusion-webui-sonar)
 
 ----
 

@@ -10,17 +10,19 @@ import gradio as gr
 import torch.nn.functional as F
 import numpy as np
 try: from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
-except ImportError: print(f"package moviepy not installed, will not be able to generate video")
+except ImportError: print('package moviepy not installed, will not be able to generate video')
 
 import modules.scripts as scripts
-from modules.processing import Processed, StableDiffusionProcessing
+from modules.processing import Processed, StableDiffusionProcessing, StableDiffusionProcessingTxt2Img, StableDiffusionProcessingImg2Img
 from modules.prompt_parser import ScheduledPromptConditioning, MulticondLearnedConditioning
 from modules.shared import state, opts
 
 __ = lambda key, value=None: opts.data.get(f'customscript/prompt_travel.py/txt2img/{key}/value', value)
 
 DEFAULT_MODE           = __('Travel mode', 'linear')
+DEFAULT_GENESIS        = __('Frame genesis', 'fixed')
 DEFAULT_STEPS          = __('Travel steps between stages', 30)
+DEFAULT_DENOISE_W      = __('Denoise strength', 1.0)
 DEFAULT_REPLACE_ORDER  = __('Replace order', 'grad_min')
 DEFAULT_GRAD_ALPHA     = __('Step size', 0.01)
 DEFAULT_GRAD_ITER      = __('Step count', 1)
@@ -30,10 +32,11 @@ DEFAULT_GRAD_W_COND    = __('Weight for cond match', 1)
 DEFAULT_VIDEO_FPS      = __('Video FPS', 10)
 DEFAULT_VIDEO_FMT      = __('Video file format', 'mp4')
 DEFAULT_VIDEO_PAD      = __('Pad begin/end frames', 0)
-DEFAULT_VIDEO_PICK     = __('Pick every n-th frame', 1)
+DEFAULT_VIDEO_PICK     = __('Pick frame by slice', '')
 DEFAULT_VIDEO_RTRIM    = __('Video drop last frame', False)
 DEFAULT_DEBUG          = __('Show console debug', True)
 
+CHOICES_GENESIS        = ['fixed', 'successive']
 CHOICES_MODE           = ['linear', 'replace', 'grad']
 CHOICES_REPLACE_ORDER  = ['random', 'most_similar', 'most_different', 'grad_min', 'grad_max']
 CHOICES_GRAD_METH      = ['clip', 'sign', 'tanh']
@@ -58,6 +61,29 @@ import modules.shared as shared
 import modules.face_restoration
 import modules.images as images
 import modules.styles
+import modules.sd_models as sd_models
+import modules.sd_vae as sd_vae
+
+
+def process_images_before(p: StableDiffusionProcessing):
+    try:
+        for k, v in p.override_settings.items():
+            setattr(opts, k, v)
+            if k == 'sd_hypernetwork': shared.reload_hypernetworks()  # make onchange call for changing hypernet
+            if k == 'sd_model_checkpoint': sd_models.reload_model_weights()  # make onchange call for changing SD model
+            if k == 'sd_vae': sd_vae.reload_vae_weights()  # make onchange call for changing VAE
+    except:
+        pass
+
+def process_images_after(p: StableDiffusionProcessing):
+    stored_opts = {k: opts.data[k] for k in p.override_settings.keys()}
+
+    for k, v in stored_opts.items():
+        setattr(opts, k, v)
+        if k == 'sd_hypernetwork': shared.reload_hypernetworks()
+        if k == 'sd_model_checkpoint': sd_models.reload_model_weights()
+        if k == 'sd_vae': sd_vae.reload_vae_weights()
+
 
 def process_images_prompt_to_cond(p: StableDiffusionProcessing, ret_token_and_weight=False) -> tuple:
     """this is the main loop that both txt2img and img2img use; it calls func_init once inside all the scopes and func_sample once per batch"""
@@ -74,8 +100,6 @@ def process_images_prompt_to_cond(p: StableDiffusionProcessing, ret_token_and_we
 
     modules.sd_hijack.model_hijack.apply_circular(p.tiling)
     modules.sd_hijack.model_hijack.clear_comments()
-
-    comments = {}
 
     if type(p.prompt) == list:
         p.all_prompts = [shared.prompt_styles.apply_styles_to_prompt(x, p.styles) for x in p.prompt]
@@ -156,19 +180,17 @@ def process_images_cond_to_image(p: StableDiffusionProcessing, c, uc, prompts, s
         with devices.autocast():
             samples_ddim = p.sample(conditioning=c, unconditional_conditioning=uc, seeds=seeds, subseeds=subseeds, subseed_strength=p.subseed_strength, prompts=prompts)
 
-        samples_ddim = samples_ddim.to(devices.dtype_vae)                   # [B=1, C=4, H=64,  W=64]
-        x_samples_ddim = decode_first_stage(p.sd_model, samples_ddim)       # [B=1, C=3, H=512, W=512]
+        # [B=1, C=4, H=64,  W=64] => [B=1, C=3, H=512, W=512]
+        x_samples_ddim = [decode_first_stage(p.sd_model, samples_ddim[i:i+1].to(dtype=devices.dtype_vae))[0].cpu() for i in range(samples_ddim.size(0))]
+        x_samples_ddim = torch.stack(x_samples_ddim).float()
         x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
+
         del samples_ddim
 
         if shared.cmd_opts.lowvram or shared.cmd_opts.medvram:
             lowvram.send_everything_to_cpu()
         devices.torch_gc()
 
-        if opts.filter_nsfw:
-            import modules.safety as safety
-            x_samples_ddim = modules.safety.censor_batch(x_samples_ddim)
-        
         n = 0       # batch count for legacy compatible
         for i, x_sample in enumerate(x_samples_ddim):
             x_sample = 255. * np.moveaxis(x_sample.cpu().numpy(), 0, 2)
@@ -178,7 +200,6 @@ def process_images_cond_to_image(p: StableDiffusionProcessing, c, uc, prompts, s
                 if opts.save and not p.do_not_save_samples and opts.save_images_before_face_restoration:
                     images.save_image(Image.fromarray(x_sample), p.outpath_samples, "", seeds[i], prompts[i], opts.samples_format, 
                                       info=infotext(n, i), p=p, suffix="-before-face-restoration")
-
                 devices.torch_gc()
                 x_sample = modules.face_restoration.restore_faces(x_sample)
                 devices.torch_gc()
@@ -400,7 +421,7 @@ def image_to_latent(model, img: Image) -> torch.Tensor:
     # type(model) == LatentDiffusion
 
     im = np.array(img).astype(np.uint8)
-    im = (im / 127.5 - 1.0).astype(np.float32)
+    im = (im / 127.5 - 1.0).astype(np.float32)      # value range [-1.0, 1.0]
     x = torch.from_numpy(im)
     x = torch.moveaxis(x, 2, 0)
     x = x.unsqueeze(dim=0)          # [B=1, C=3, H=512, W=512]
@@ -409,14 +430,89 @@ def image_to_latent(model, img: Image) -> torch.Tensor:
     latent = model.get_first_stage_encoding(model.encode_first_stage(x))    # [B=1, C=4, H=64, W=64]
     return latent
 
+def spc_get_cond(c:List[List[ScheduledPromptConditioning]]) -> torch.Tensor:
+    return c[0][0].cond
+
+def spc_replace_cond(c:List[List[ScheduledPromptConditioning]], cond: torch.Tensor) -> ScheduledPromptConditioning:
+    r = deepcopy(c)
+    spc = r[0][0]
+    r[0][0] = ScheduledPromptConditioning(spc.end_at_step, cond=cond)
+    return r
+
 def mlc_get_cond(c:MulticondLearnedConditioning) -> torch.Tensor:
     return c.batch[0][0].schedules[0].cond      # [B=1, T=77, D=768]
 
 def mlc_replace_cond(c:MulticondLearnedConditioning, cond: torch.Tensor) -> MulticondLearnedConditioning:
     r = deepcopy(c)
     spc = r.batch[0][0].schedules[0]
-    r.batch[0][0].schedules[0] = ScheduledPromptConditioning(spc.end_at_step, cond)
+    r.batch[0][0].schedules[0] = ScheduledPromptConditioning(spc.end_at_step, cond=cond)
     return r
+
+
+def update_img2img_p(p: StableDiffusionProcessing, img:Image, denoising_strength:float=0.75) -> StableDiffusionProcessingImg2Img:
+    if isinstance(p, StableDiffusionProcessingImg2Img):
+        p.init_images = [img]
+        p.denoising_strength = denoising_strength
+        return p
+
+    if isinstance(p, StableDiffusionProcessingTxt2Img):
+        KNOWN_KEYS = [      # see `StableDiffusionProcessing.__init__()`
+            'sd_model',
+            'outpath_samples',
+            'outpath_grids',
+            'prompt',
+            'styles',
+            'seed',
+            'subseed',
+            'subseed_strength',
+            'seed_resize_from_h',
+            'seed_resize_from_w',
+            'seed_enable_extras',
+            'sampler_name',
+            'batch_size',
+            'n_iter',
+            'steps',
+            'cfg_scale',
+            'width',
+            'height',
+            'restore_faces',
+            'tiling',
+            'do_not_save_samples',
+            'do_not_save_grid',
+            'extra_generation_params',
+            'overlay_images',
+            'negative_prompt',
+            'eta',
+            'do_not_reload_embeddings',
+            #'denoising_strength',
+            'ddim_discretize',
+            's_churn',
+            's_tmax',
+            's_tmin',
+            's_noise',
+            'override_settings',
+            'sampler_index',
+        ]
+        kwargs = { k: getattr(p, k) for k in dir(p) if k in KNOWN_KEYS }    # inherit params
+        return StableDiffusionProcessingImg2Img(
+            init_images=[img],
+            denoising_strength=denoising_strength,
+            **kwargs,
+        )
+
+def parse_slice(picker:str) -> Union[slice, None]:
+    if not picker.strip(): return None
+    
+    to_int = lambda s: None if not s else int(s)
+    segs = [to_int(x.strip()) for x in picker.strip().split(':')]
+    
+    start, stop, step = None, None, None
+    if   len(segs) == 1:        stop,      = segs
+    elif len(segs) == 2: start, stop       = segs
+    elif len(segs) == 3: start, stop, step = segs
+    else: raise ValueError
+    
+    return slice(start, stop, step)
 
 
 class Script(scripts.Script):
@@ -425,15 +521,19 @@ class Script(scripts.Script):
         return 'Prompt Travel'
 
     def describe(self):
-        return "Gradually travels from one prompt to another in the semantical latent space."
+        return 'Travel from one prompt to another in the latent space.'
 
     def show(self, is_img2img):
         return True
 
     def ui(self, is_img2img):
         with gr.Group():
-            mode  = gr.Radio  (label='Travel mode',                 value=lambda: DEFAULT_MODE, choices=CHOICES_MODE)
-            steps = gr.Textbox(label='Travel steps between stages', value=lambda: DEFAULT_STEPS)
+            with gr.Row():
+                mode    = gr.Radio(label='Travel mode',   value=lambda: DEFAULT_MODE,    choices=CHOICES_MODE)
+                genesis = gr.Radio(label='Frame genesis', value=lambda: DEFAULT_GENESIS, choices=CHOICES_GENESIS)
+            with gr.Row():
+                steps = gr.Text(label='Travel steps between stages', value=lambda: DEFAULT_STEPS, max_lines=1)
+                denoise_strength = gr.Slider(label='Denoise strength', value=lambda: DEFAULT_DENOISE_W, minimum=0.0, maximum=1.0, visible=True)
     
         with gr.Group(visible=False) as tab_replace:
             replace_order = gr.Dropdown(label='Replace order', value=lambda: DEFAULT_REPLACE_ORDER, choices=CHOICES_REPLACE_ORDER)
@@ -452,12 +552,10 @@ class Script(scripts.Script):
                 video_fmt  = gr.Dropdown(label='Video file format',     value=lambda: DEFAULT_VIDEO_FMT, choices=CHOICES_VIDEO_FMT)
                 video_fps  = gr.Number  (label='Video FPS',             value=lambda: DEFAULT_VIDEO_FPS)
                 video_pad  = gr.Number  (label='Pad begin/end frames',  value=lambda: DEFAULT_VIDEO_PAD,  precision=0)
-                video_pick = gr.Number  (label='Pick every n-th frame', value=lambda: DEFAULT_VIDEO_PICK, precision=0)
+                video_pick = gr.Text    (label='Pick frame by slice',   value=lambda: DEFAULT_VIDEO_PICK, max_lines=1)
 
         with gr.Group():
-            with gr.Row():
-                video_rtrim = gr.Checkbox(label='Video drop last frame', value=lambda: DEFAULT_VIDEO_RTRIM)
-                show_debug = gr.Checkbox(label='Show console debug', value=lambda: DEFAULT_DEBUG)
+            show_debug = gr.Checkbox(label='Show console debug', value=lambda: DEFAULT_DEBUG)
 
         def switch_mode(mode, replace_order):
             requires_grad = mode == 'grad' or replace_order.startswith('grad')
@@ -471,10 +569,19 @@ class Script(scripts.Script):
         mode         .change(fn=switch_mode, inputs=[mode, replace_order], outputs=[tab_replace, tab_grad])
         replace_order.change(fn=switch_mode, inputs=[mode, replace_order], outputs=[tab_replace, tab_grad])
 
-        return [mode, steps, 
+        # This not work, do not know why...
+        #def switch_genesis(genesis):
+        #    show = genesis == 'successive'
+        #    return [
+        #        { 'visible': show, '__type__': 'update' }
+        #    ]
+        #
+        #genesis.change(fn=switch_genesis, inputs=[genesis], outputs=[denoise_strength])
+
+        return [genesis, denoise_strength, mode, steps, 
             replace_order,
             grad_alpha, grad_iter, grad_meth, grad_w_latent, grad_w_cond,
-            video_fmt, video_fps, video_pad, video_pick, video_rtrim,
+            video_fmt, video_fps, video_pad, video_pick,
             show_debug]
     
     def get_next_sequence_number(path):
@@ -490,26 +597,28 @@ class Script(scripts.Script):
                 pass
         return result + 1
 
-    def run(self, p:StableDiffusionProcessing, mode:str, steps:int, 
+    def run(self, p:StableDiffusionProcessing, 
+            genesis:str, denoise_strength:float, mode:str, steps:str, 
             replace_order: str,
             grad_alpha:float, grad_iter:int, grad_meth:str, grad_w_latent:float, grad_w_cond:float,
-            video_fmt:str, video_fps:float, video_pad:int, video_pick:int, video_rtrim:bool,
+            video_fmt:str, video_fps:float, video_pad:int, video_pick:str,
             show_debug:bool):
         
         # Param check
         if grad_iter <= 0: return Processed(p, [], p.seed, 'grad_iter must > 0')
-        if video_pick < 1: return Processed(p, [], p.seed, 'video_pick must >= 1')
         if video_pad  < 0: return Processed(p, [], p.seed, 'video_pad must >= 0')
         if video_fps  < 0: return Processed(p, [], p.seed, 'video_fps must >= 0')
-
+        try: video_slice = parse_slice(video_pick)
+        except: return Processed(p, [], p.seed, 'syntax error in video_slice')
+        
         # Prepare prompts
         prompt_pos = p.prompt.strip()
-        if not prompt_pos: return Processed(p, [], p.seed, 'positive prompt should not be empty')
+        if not prompt_pos: return Processed(p, [], p.seed, 'positive prompt should not be empty :(')
         pos_prompts = [p.strip() for p in prompt_pos.split('\n') if p.strip()]
         if len(pos_prompts) == 1:
             # NOTE: if only single stage specified, we double it to allow wandering around :)
-            if mode == 'grad': pos_prompts = pos_prompts * 2
-            else: return Processed(p, [], p.seed, 'should specify at least two lines of prompt to travel between')
+            if mode == 'grad' or p.subseed == -1: pos_prompts = pos_prompts * 2
+            else: return Processed(p, [], p.seed, 'should specify at least two lines of prompt to travel between :)')
         prompt_neg = p.negative_prompt.strip()
         neg_prompts = [p.strip() for p in prompt_neg.split('\n') if p.strip()]
         n_stages = max(len(pos_prompts), len(neg_prompts))
@@ -522,8 +631,7 @@ class Script(scripts.Script):
         if len(steps) == 1:
             steps = [steps[0]] * (n_stages - 1)
         elif len(steps) != n_stages - 1:
-            info = (f'stage count mismatch: you have {n_stages} prompt stages, but specified {len(steps)} steps; '
-                    'should be len(steps) == len(stages) - 1')
+            info = (f'stage count mismatch: you have {n_stages} prompt stages, but specified {len(steps)} steps; should assure len(steps) == len(stages) - 1')
             return Processed(p, [], p.seed, info)
         count = sum(steps) + n_stages
         if show_debug: print(f'n_stages={n_stages}, steps={steps}')
@@ -533,7 +641,7 @@ class Script(scripts.Script):
         travel_path = os.path.join(p.outpath_samples, 'prompt_travel')
         os.makedirs(travel_path, exist_ok=True)
         travel_number = Script.get_next_sequence_number(travel_path)
-        self.log_dp = os.path.join(travel_path, f"{travel_number:05}")
+        self.log_dp = os.path.join(travel_path, f'{travel_number:05}')
         p.outpath_samples = self.log_dp
         os.makedirs(self.log_dp, exist_ok=True)
         self.log_fp = os.path.join(self.log_dp, 'log.txt')
@@ -544,29 +652,46 @@ class Script(scripts.Script):
 
         # Random unified const seed
         p.seed = get_fixed_seed(p.seed)     # fix it to assure all processes using the same major seed
-        self.subseed = p.subseed            # stash it to allow using random subseed for each process
+        self.subseed = p.subseed            # stash it to allow using random subseed for each process (when -1)
         if show_debug:
-            print('seed:',    p.seed)
-            print('subseed:', p.subseed)
+            print('seed:',             p.seed)
+            print('subseed:',          p.subseed)
+            print('subseed_strength:', p.subseed_strength)
 
         # Start job
         state.job_count = count
-        print(f"Generating {count} images.")
+        print(f'Generating {count} images.')
 
-        # Implementation dispatcher
-        if   mode == 'linear' : images, info = self.run_linear (p, pos_prompts, neg_prompts, steps, show_debug)
-        elif mode == 'replace': images, info = self.run_replace(p, pos_prompts, neg_prompts, steps, replace_order, grad_w_latent, grad_w_cond, show_debug)
-        elif mode == 'grad'   : images, info = self.run_grad   (p, pos_prompts, neg_prompts, steps, grad_alpha, grad_iter, grad_meth, grad_w_latent, grad_w_cond, show_debug)
+        # Pack parameters
+        self.p                = p
+        self.pos_prompts      = pos_prompts
+        self.neg_prompts      = neg_prompts
+        self.steps            = steps
+        self.genesis          = genesis
+        self.denoise_strength = denoise_strength
+        self.replace_order    = replace_order
+        self.grad_alpha       = grad_alpha
+        self.grad_iter        = grad_iter
+        self.grad_meth        = grad_meth
+        self.grad_w_latent    = grad_w_latent
+        self.grad_w_cond      = grad_w_cond
+        self.show_debug       = show_debug
+
+        # Dispatch
+        process_images_before(p)
+        if   mode == 'linear' : images, info = self.run_linear()
+        elif mode == 'replace': images, info = self.run_replace()
+        elif mode == 'grad'   : images, info = self.run_grad()
+        process_images_after(p)
 
         # Save video
         if video_fps > 0 and len(images) > 1:
             try:
                 seq = [np.asarray(t) for t in images]
-                if video_rtrim:    seq = seq[:-1]
-                if video_pad > 0:  seq = [seq[0]] * video_pad + seq + [seq[-1]] * video_pad
-                if video_pick > 1: seq = seq[::video_pick]
+                if video_slice:   seq = seq[video_slice]
+                if video_pad > 0: seq = [seq[0]] * video_pad + seq + [seq[-1]] * video_pad
                 clip = ImageSequenceClip(seq, fps=video_fps)
-                fbase = os.path.join(self.log_dp, f"travel-{travel_number:05}")
+                fbase = os.path.join(self.log_dp, f'travel-{travel_number:05}')
                 if video_fmt == 'mp4':
                     clip.write_videofile(fbase + '.mp4', verbose=False, audio=False)
                 elif video_fmt == 'gif':
@@ -576,49 +701,62 @@ class Script(scripts.Script):
 
         return Processed(p, images, p.seed, info)
 
-    def run_linear(self, p:StableDiffusionProcessing, pos_prompts:List[str], neg_prompts:List[str], steps:List[int], show_debug:bool):
+    def run_linear(self):
+        p:StableDiffusionProcessing = self.p
+        genesis:str                 = self.genesis
+        denoise_strength:float      = self.denoise_strength
+        pos_prompts:List[str]       = self.pos_prompts
+        neg_prompts:List[str]       = self.neg_prompts
+        steps:List[int]             = self.steps
+        show_debug:bool             = self.show_debug
+
         n_stages = len(steps)
+        n_frames = sum(steps) + n_stages - 1
         initial_info = None
         images = []
 
         def weighted_sum(A, B, alpha:float, kind:str) -> Union[ScheduledPromptConditioning, MulticondLearnedConditioning]:
             ''' linear interpolate on latent space of condition '''
-            C = deepcopy(A)
             if kind == 'pos':
-                condA = A.batch[0][0].schedules[0].cond
-                condB = B.batch[0][0].schedules[0].cond
+                condA = mlc_get_cond(A)
+                condB = mlc_get_cond(B)
                 condC = (1 - alpha) * condA + (alpha) * condB
-                end_at_step = C.batch[0][0].schedules[0].end_at_step
-                C.batch[0][0].schedules[0] = ScheduledPromptConditioning(end_at_step, condC)
+                C = mlc_replace_cond(A, condC)
             if kind == 'neg':
-                condA = A[0][0].cond
-                condB = B[0][0].cond
+                condA = spc_get_cond(A)
+                condB = spc_get_cond(B)
                 condC = (1 - alpha) * condA + (alpha) * condB
-                end_at_step = C[0][0].end_at_step
-                C[0][0] = ScheduledPromptConditioning(end_at_step, condC)
+                C = spc_replace_cond(A, condC)
             return C
 
-        def draw_by_cond(pos_hidden, neg_hidden, prompts, seeds, subseeds):
+        def gen_image(pos_hidden, neg_hidden, prompts, seeds, subseeds):
             nonlocal images, initial_info, p
             proc = process_images_cond_to_image(p, pos_hidden, neg_hidden, prompts, seeds, subseeds)
             if initial_info is None: initial_info = proc.info
-            images += proc.images
+            img = proc.images[0]
+            if genesis == 'successive': p = update_img2img_p(p, img, denoise_strength)
+            images += [img]
 
         # Step 1: draw the init image
         if show_debug:
             print(f'[stage 1/{n_stages}]')
             print(f'  pos prompts: {pos_prompts[0]}')
             print(f'  neg prompts: {neg_prompts[0]}')
-        p.prompt           = pos_prompts[0]
-        p.negative_prompt  = neg_prompts[0]
-        p.subseed          = self.subseed
+        p.prompt          = pos_prompts[0]
+        p.negative_prompt = neg_prompts[0]
+        p.subseed         = self.subseed
         from_pos_hidden, from_neg_hidden, prompts, seeds, subseeds = process_images_prompt_to_cond(p)
-        draw_by_cond(from_pos_hidden, from_neg_hidden, prompts, seeds, subseeds)
+        gen_image(from_pos_hidden, from_neg_hidden, prompts, seeds, subseeds)
         
         # travel through stages
+        i_frames = 1
         for i in range(1, n_stages):
             if state.interrupted: break
             devices.torch_gc()
+
+            state.job = f'{i_frames}/{n_frames}'
+            state.job_no = i_frames + 1
+            i_frames += 1
 
             # only change target prompts
             if show_debug:
@@ -640,32 +778,50 @@ class Script(scripts.Script):
                 alpha = t / n_inter     # [1/T, 2/T, .. T-1/T]
                 inter_pos_hidden = weighted_sum(from_pos_hidden, to_pos_hidden, alpha, kind='pos')
                 inter_neg_hidden = weighted_sum(from_neg_hidden, to_neg_hidden, alpha, kind='neg')
-                draw_by_cond(inter_pos_hidden, inter_neg_hidden, prompts, seeds, subseeds)
+                gen_image(inter_pos_hidden, inter_neg_hidden, prompts, seeds, subseeds)
 
             if is_break_iter: break
 
             # Step 3: draw the fianl stage
-            draw_by_cond(to_pos_hidden, to_neg_hidden, prompts, seeds, subseeds)
+            gen_image(to_pos_hidden, to_neg_hidden, prompts, seeds, subseeds)
             
             # move to next stage
             from_pos_hidden, from_neg_hidden = to_pos_hidden, to_neg_hidden
 
         return images, initial_info
 
-    def run_replace(self, p:StableDiffusionProcessing, pos_prompts:List[str], neg_prompts:List[str], steps:List[int], replace_order:str, grad_w_latent:float, grad_w_cond:float, show_debug:bool):
+    def run_replace(self):
+        p:StableDiffusionProcessing = self.p
+        genesis:str                 = self.genesis
+        denoise_strength:float      = self.denoise_strength
+        pos_prompts:List[str]       = self.pos_prompts
+        steps:List[int]             = self.steps
+        replace_order:str           = self.replace_order
+        grad_w_latent:float         = self.grad_w_latent
+        grad_w_cond:float           = self.grad_w_cond
+        show_debug:bool             = self.show_debug
+
         clip_model = p.sd_model.cond_stage_model
         n_stages = len(steps)
+        n_frames = sum(steps) + n_stages - 1
         initial_info = None
         images = []
 
+        def gen_image(pos_hidden, neg_hidden, prompts, seeds, subseeds, ret_img=False):
+            nonlocal images, initial_info, p
+            proc = process_images_cond_to_image(p, pos_hidden, neg_hidden, prompts, seeds, subseeds)
+            if initial_info is None: initial_info = proc.info
+            img = proc.images[0]
+            if genesis == 'successive': p = update_img2img_p(p, img, denoise_strength)
+            if ret_img: return img
+            else: images += [img]
+        
         # Step 1: draw init image
         if show_debug: print(f'[stage 1/{n_stages}] prompts: {pos_prompts[0]}')
         p.prompt = pos_prompts[0]
         p.subseed = self.subseed
         c, uc, prompts, seeds, subseeds, (c_tokens, c_weights, uc_tokens, uc_weights) = process_images_prompt_to_cond(p, ret_token_and_weight=True)
-        proc = process_images_cond_to_image(p, c, uc, prompts, seeds, subseeds)
-        if initial_info is None: initial_info = proc.info
-        images += proc.images
+        gen_image(c, uc, prompts, seeds, subseeds)
 
         # make log
         log_fh = open(self.log_fp, 'w', encoding='utf-8')
@@ -675,8 +831,9 @@ class Script(scripts.Script):
         text_rev = token_to_text(clip_model, c_tokens)
         log_fh.write(f'tokens: {text_rev}\n')
         log_fh.write('\n')
-
+        
         # travel between stages
+        i_frames = 1
         for i in range(1, n_stages):
             if state.interrupted: break
             devices.torch_gc()
@@ -687,9 +844,7 @@ class Script(scripts.Script):
             p.subseed = self.subseed
             *params, (tgt_c_tokens, tgt_c_weights, tgt_uc_tokens, tgt_uc_weights) = process_images_prompt_to_cond(p, ret_token_and_weight=True)
             _, _, used_custom_terms, hijack_comments, hijack_fixes, _ = text_to_token(clip_model, [p.prompt])
-            proc = process_images_cond_to_image(p, *params)
-            if initial_info is None: initial_info = proc.info
-            target_image = proc.images[0]     # cache it here to make video sequence order right
+            target_image = gen_image(*params, ret_img=True)     # cache it here to make video sequence order right
             
             with torch.no_grad(), devices.autocast():
                 if replace_order.startswith('grad'):
@@ -706,6 +861,10 @@ class Script(scripts.Script):
             for _ in range(steps[i]):
                 if state.interrupted: is_break_step = True ; break
                 devices.torch_gc()
+
+                state.job = f'{i_frames}/{n_frames}'
+                state.job_no = i_frames + 1
+                i_frames += 1
 
                 mask = np.asarray(c_tokens[0]) != np.asarray(tgt_c_tokens[0])   # [T=75]
                 n_replaces = sum(mask)
@@ -772,18 +931,14 @@ class Script(scripts.Script):
                 else:
                     tokens_l1_asc = [tokens[idx] for idx in sorted_indexes_L1_ascending if idx < len(tokens)]
                     log_fh.write(f'  >> embed L1-distance ascend: {" ".join(tokens_l1_asc)}\n')
+                log_fh.write(f'\n')
                 log_fh.flush()
 
                 # move to new 'c' (one travel step!)
                 # FIXME: we do not walk on 'uc' so far
                 cond = token_to_cond(clip_model, c_weights, c_tokens, used_custom_terms, hijack_comments, hijack_fixes)
                 c = mlc_replace_cond(c, cond.detach().squeeze(0))
-
-                proc = process_images_cond_to_image(p, c, uc, prompts, seeds, subseeds)
-                if initial_info is None: initial_info = proc.info
-                images += proc.images
-
-                log_fh.write(f'\n')
+                gen_image(c, uc, prompts, seeds, subseeds)
 
             if is_break_step: break
 
@@ -799,19 +954,39 @@ class Script(scripts.Script):
 
         return images, initial_info
 
-    def run_grad(self, p:StableDiffusionProcessing, pos_prompts:List[str], neg_prompts:List[str], steps:List[int], grad_alpha:float, grad_iter:int, grad_meth:str, grad_w_latent:float, grad_w_cond:float, show_debug:bool):
+    def run_grad(self):
+        p:StableDiffusionProcessing = self.p
+        genesis:str                 = self.genesis
+        denoise_strength:float      = self.denoise_strength
+        pos_prompts:List[str]       = self.pos_prompts
+        steps:List[int]             = self.steps
+        grad_alpha:float            = self.grad_alpha
+        grad_iter:int               = self.grad_iter
+        grad_meth:str               = self.grad_meth
+        grad_w_latent:float         = self.grad_w_latent
+        grad_w_cond:float           = self.grad_w_cond
+        show_debug:bool             = self.show_debug
+
         n_stages = len(steps)
+        n_frames = sum(steps) + n_stages - 1
         initial_info = None
         images = []
 
+        def gen_image(pos_hidden, neg_hidden, prompts, seeds, subseeds, ret_img=False):
+            nonlocal images, initial_info, p
+            proc = process_images_cond_to_image(p, pos_hidden, neg_hidden, prompts, seeds, subseeds)
+            if initial_info is None: initial_info = proc.info
+            img = proc.images[0]
+            if genesis == 'successive': p = update_img2img_p(p, img, denoise_strength)
+            if ret_img: return img
+            else: images += [img]
+        
         # Step 1: draw init image
         if show_debug: print(f'[stage 1/{n_stages}] prompts: {pos_prompts[0]}')
         p.prompt = pos_prompts[0]
         p.subseed = self.subseed
         c, uc, prompts, seeds, subseeds = process_images_prompt_to_cond(p)
-        proc = process_images_cond_to_image(p, c, uc, prompts, seeds, subseeds)
-        if initial_info is None: initial_info = proc.info
-        images += proc.images
+        gen_image(c, uc, prompts, seeds, subseeds)
 
         # make log
         log_fh = open(self.log_fp, 'w', encoding='utf-8')
@@ -823,6 +998,7 @@ class Script(scripts.Script):
         log_fh.write('\n')
 
         # travel between stages
+        i_frames = 1
         for i in range(1, n_stages):
             if state.interrupted: break
             devices.torch_gc()
@@ -832,9 +1008,7 @@ class Script(scripts.Script):
             p.prompt = pos_prompts[i]
             p.subseed = self.subseed
             params = process_images_prompt_to_cond(p)
-            proc = process_images_cond_to_image(p, *params)
-            if initial_info is None: initial_info = proc.info
-            target_image = proc.images[0]     # cache it here to make video sequence order right
+            target_image = gen_image(*params, ret_img=True)     # cache it here to make video sequence order right
             
             with torch.no_grad(), devices.autocast():
                 target_latent = image_to_latent(p.sd_model, target_image)   # [B=1, C=4, H=64, W=64]
@@ -847,6 +1021,10 @@ class Script(scripts.Script):
             for _ in range(steps[i]):
                 if state.interrupted: is_break_step = True ; break
                 devices.torch_gc()
+
+                state.job = f'{i_frames}/{n_frames}'
+                state.job_no = i_frames + 1
+                i_frames += 1
 
                 with devices.autocast():
                     current_cond = mlc_get_cond(c).unsqueeze(0).clone()  # [B=1, T=77, D=768]
@@ -897,10 +1075,7 @@ class Script(scripts.Script):
                 # move to new 'c' (one travel step!)
                 # FIXME: we do not walk on 'uc' so far
                 c = mlc_replace_cond(c, current_cond.detach().squeeze(0))
-
-                proc = process_images_cond_to_image(p, c, uc, prompts, seeds, subseeds)
-                if initial_info is None: initial_info = proc.info
-                images += proc.images
+                gen_image(c, uc, prompts, seeds, subseeds)
 
             if is_break_step: break
 
