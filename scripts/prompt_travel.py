@@ -621,6 +621,7 @@ class Script(scripts.Script):
             else: return Processed(p, [], p.seed, 'should specify at least two lines of prompt to travel between :)')
         prompt_neg = p.negative_prompt.strip()
         neg_prompts = [p.strip() for p in prompt_neg.split('\n') if p.strip()]
+        if len(neg_prompts) == 0: neg_prompts = ['']
         n_stages = max(len(pos_prompts), len(neg_prompts))
         while len(pos_prompts) < n_stages: pos_prompts.append(pos_prompts[-1])
         while len(neg_prompts) < n_stages: neg_prompts.append(neg_prompts[-1])

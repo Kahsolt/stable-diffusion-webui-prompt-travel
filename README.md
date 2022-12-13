@@ -36,6 +36,7 @@ Try interpolating on the hidden vectors of conditioning prompt to make seemingly
 
 ⚪ Fixups
 
+- 2022/12/13: fixup no working when negative prompt is left empty (issue #6: `neg_prompts[-1] IndexError: List index out of range`)
 - 2022/11/27: keep up with webui's updates (error `ImportError: FrozenCLIPEmbedderWithCustomWords`)
 - 2022/11/20: keep up with webui's updates (error `AttributeError: p.all_negative_prompts[0]`)
 
