@@ -29,20 +29,23 @@ Try interpolating on the hidden vectors of conditioning prompt to make seemingly
 
 ⚪ Compatibility Warning
 
+- 2023/01/12: webui's recent commit [#50e25362794d46cd9a55c70e953a8b4126fd42f7](https://github.com/AUTOMATIC1111/stable-diffusion-webui/commit/50e25362794d46cd9a55c70e953a8b4126fd42f7) refactors CLIP-related code and make wrapper even more deeper, harder to hack in, causing the replace mode also henceforth dead. I finally decide to **remove the experimental 'replace' & 'grad'** functionality :( 
 - 2023/01/04: webui's recent commit [#bd68e35de3b7cf7547ed97d8bdf60147402133cc](https://github.com/AUTOMATIC1111/stable-diffusion-webui/commit/bd68e35de3b7cf7547ed97d8bdf60147402133cc) saves memory use in forward calculation, but totally ruins backward gradient calculation via `torch.autograd.grad()` which this script heavily relies on. This change is so far not pluggable but forcely applied, so we're regrettable to say, prompt-travel's grad mode and part of the replace mode will be broken henceforth. (issue #7 cannot be fixed)
 
 ⚪ Features
 
-- 2022/12/11: work in a more 'successive' way, idea borrowed from [deforum](https://github.com/deforum-art/deforum-for-automatic1111-webui) ('genesis' option)
-- 2022/11/14: walk by substituting token embedding ('replace' mode)
-- 2022/11/13: walk by optimizing condition ('grad' mode)
-- 2022/11/10: interpolate linearly on condition/uncondition ('linear' mode)
+- 2023/01/12: `v1.4` remove 'replace' & 'grad' mode support, due to webui's code change
+- 2022/12/11: `v1.3` work in a more 'successive' way, idea borrowed from [deforum](https://github.com/deforum-art/deforum-for-automatic1111-webui) ('genesis' option)
+- 2022/11/14: `v1.2` walk by substituting token embedding ('replace' mode)
+- 2022/11/13: `v1.1` walk by optimizing condition ('grad' mode)
+- 2022/11/10: `v1.0` interpolate linearly on condition/uncondition ('linear' mode)
 
 ⚪ Fixups
 
-- 2022/12/13: fixup no working when negative prompt is left empty (issue #6: `neg_prompts[-1] IndexError: List index out of range`)
-- 2022/11/27: keep up with webui's updates (error `ImportError: FrozenCLIPEmbedderWithCustomWords`)
-- 2022/11/20: keep up with webui's updates (error `AttributeError: p.all_negative_prompts[0]`)
+- 2023/01/12: `v1.4` keep up with webui's updates (issue #9: `AttributeError: 'FrozenCLIPEmbedderWithCustomWords' object has no attribute 'process_text'`)
+- 2022/12/13: `#bdd8bed` fixup no working when negative prompt is left empty (issue #6: `neg_prompts[-1] IndexError: List index out of range`)
+- 2022/11/27: `v1.2-fix2` keep up with webui's updates (error `ImportError: FrozenCLIPEmbedderWithCustomWords`)
+- 2022/11/20: `v1.2-fix1` keep up with webui's updates (error `AttributeError: p.all_negative_prompts[0]`)
 
 
 ### How it works?
@@ -99,11 +102,6 @@ Hypernet: (this is my secret :)
   - input multiple lines of prompt text
   - we call each line of prompt a stage, usually you need at least 2 lines of text to starts travel (unless in 'grad' mode)
   - if len(positive_prompts) != len(negative_prompts), the shorter one's last item will be repeated to match the longer one
-- mode: (categorical)
-  - `linear`: interpolate linearly on condition/uncondition in latent space
-  - `replace`: walk by gradually substituting word embeddings 
-  - `grad`: walk by optimizing certain loss
-  - NOTE: `walk` methods might not reach target stages in specified steps some times, or reached earlier than expect, in that case, manually tune `grad_alpha` and `steps`  might help a little...
 - steps: (int, list of int)
   - number of images to interpolate between two stages
   - if int, constant number of travel steps
@@ -112,24 +110,6 @@ Hypernet: (this is my secret :)
   - `fixed`: starts from pure noise in txt2img pipeline, or from the same ref-image given in img2img pipeline
   - `successive`: starts from the last generated image (this will force txt2img turn to actually be img2img from the 2nd frame on)
 - denoise_strength: (float), denoise strength in img2img pipelines when `genesis == 'successive'`
-- replace_*
-  - replace_order: (categorical)
-    - `random`: substitute tokens randomly
-    - `similiar`: substitute most similar tokens first (L1 distance of token embeddings)
-    - `different`: substitute most different tokens first
-    - `grad_min`: substitute tokens that causing smallest gradient first (gradient settings same as in `grad` mode)
-    - `grad_max`: substitute tokens that causing largest gradient first
-- grad_*
-  - grad_alpha: (float), step size of a walk pace
-  - grad_iter: (int), step count of walk paces
-    - you can try trading `grad_alpha=0.01 grad_iter=1` for `grad_alpha=0.001 grad_iter=10`
-    - might be more cautious (perhaps!), but definitely takes more time
-  - grad_meth: (categorical), step function of a walk pace
-    - `clip`: a triky balance between `sign` and `tanh`
-    - `sign`: walk at a constant speed (often stuck into oscillation at the end)
-    - `tanh`: significantly speed down when approaching (it takes infinite time to exactly reach...)
-  - grad_w_latent: (float), weight factor of `loss_latent`
-  - grad_w_cond: (float), weight factor of `loss_cond`
 - video_*
   - fps: (float), FPS of video, set `0` to disable file saving
   - fmt: (categorical), export video file format
@@ -154,7 +134,7 @@ Manual install:
 2. (Optional) Restart the webui
 
 
-### Experimental
+### <del>Experimental</del> (removed since v1.4)
 
 ⚪ grad mode
 
@@ -187,8 +167,6 @@ This mode working on token embed input level, hence your can view `log.txt` to s
 ⚠ Remember that comma is a normal valid token, so you might see many commas there. However, they are different when appearing at different positions within the token sequence.  
 
 The actual token replacing order might reveal some information of the token importance, might the listed '>> grad ascend' or '>> embed L1-distance ascend' give you some ideas to tune your input prompt (I wish so..)
-
-
 
 
 ### Related Projects
