@@ -34,6 +34,7 @@ Try interpolating on the hidden vectors of conditioning prompt to make seemingly
 
 ⚪ Features
 
+- 2023/01/16: `v1.5` add upscale options (issue #12); add 'embryo' genesis, reproducing idea of [stable-diffusion-animation](https://replicate.com/andreasjansson/stable-diffusion-animation) except [FILM](https://github.com/google-research/frame-interpolation) support (issue #11)
 - 2023/01/12: `v1.4` remove 'replace' & 'grad' mode support, due to webui's code change
 - 2022/12/11: `v1.3` work in a more 'successive' way, idea borrowed from [deforum](https://github.com/deforum-art/deforum-for-automatic1111-webui) ('genesis' option)
 - 2022/11/14: `v1.2` walk by substituting token embedding ('replace' mode)
@@ -42,6 +43,7 @@ Try interpolating on the hidden vectors of conditioning prompt to make seemingly
 
 ⚪ Fixups
 
+- 2023/01/16: `v1.5` apply zero padding when condition length mismatch (issue #10: `RuntimeError: The size of tensor a (77) must match the size of tensor b (154) at non-singleton dimension 0`), typo in demo filename
 - 2023/01/12: `v1.4` keep up with webui's updates (issue #9: `AttributeError: 'FrozenCLIPEmbedderWithCustomWords' object has no attribute 'process_text'`)
 - 2022/12/13: `#bdd8bed` fixup no working when negative prompt is left empty (issue #6: `neg_prompts[-1] IndexError: List index out of range`)
 - 2022/11/27: `v1.2-fix2` keep up with webui's updates (error `ImportError: FrozenCLIPEmbedderWithCustomWords`)
@@ -59,23 +61,27 @@ Try interpolating on the hidden vectors of conditioning prompt to make seemingly
 
 ⚪ Txt2Img
 
-| sampler \ genesis | fixed | successive |
-| :-: | :-: | :-: |
-| Eular a | ![t2i-f-eular_a](img/t2i-f-eular_a.gif) | ![t2i-s-eular_a](img/t2i-s-eular_a.gif) |
-| DDIM    | ![t2i-f-ddim](img/t2i-f-ddim.gif)       | ![t2i-s-ddim](img/t2i-s-ddim.gif)       |
+| sampler \ genesis | fixed | successive | embryo |
+| :-: | :-: | :-: | :-: |
+| Eular a | ![t2i-f-euler_a](img/t2i-f-euler_a.gif) | ![t2i-s-euler_a](img/t2i-s-euler_a.gif) | ![t2i-e-euler_a](img/t2i-e-euler_a.gif) |
+| DDIM    | ![t2i-f-ddim](img/t2i-f-ddim.gif)       | ![t2i-s-ddim](img/t2i-s-ddim.gif)       | ![t2i-e-ddim](img/t2i-e-ddim.gif)       |
 
 ⚪ Img2Img
 
-| sampler \ genesis | fixed | successive |
-| :-: | :-: | :-: |
-| Eular a | ![i2i-f-eular_a](img/i2i-f-eular_a.gif) | ![i2i-s-eular_a](img/i2i-s-eular_a.gif) |
-| DDIM    | ![i2i-f-ddim](img/i2i-f-ddim.gif)       | ![i2i-s-ddim](img/i2i-s-ddim.gif)       |
+| sampler \ genesis | fixed | successive | embryo |
+| :-: | :-: | :-: | :-: |
+| Eular a | ![i2i-f-euler_a](img/i2i-f-euler_a.gif) | ![i2i-s-euler_a](img/i2i-s-euler_a.gif) | ![i2i-e-euler_a](img/i2i-e-euler_a.gif) |
+| DDIM    | ![i2i-f-ddim](img/i2i-f-ddim.gif)       | ![i2i-s-ddim](img/i2i-s-ddim.gif)       | ![i2i-e-ddim](img/i2i-e-ddim.gif)       |
 
 Reference image for img2img:
 
 ![i2i-ref](img/i2i-ref.png)
 
-Example above run configure ('linear' mode):
+Embryo image decoded (case `i2i-e-euler_a` with `embryo_step=8`):
+
+![embryo](img/embryo.png)
+
+Example above run configure:
 
 ```
 Prompt:
@@ -109,7 +115,13 @@ Hypernet: (this is my secret :)
 - genesis: (categorical), the a prior for each image frame
   - `fixed`: starts from pure noise in txt2img pipeline, or from the same ref-image given in img2img pipeline
   - `successive`: starts from the last generated image (this will force txt2img turn to actually be img2img from the 2nd frame on)
-- denoise_strength: (float), denoise strength in img2img pipelines when `genesis == 'successive'`
+  - `embryo`: starts from the same half-denoised image, see [=> How does it work?](https://replicate.com/andreasjansson/stable-diffusion-animation#readme) 
+    - (experimental): it only processes 2 lines of prompts, and does not interpolate on negative_prompt, and with no FILM postprocessing :(
+- genesis_extra_params:
+  - denoise_strength: (float), denoise strength in img2img pipelines (for `successive`)
+  - embryo_step: (int or float), steps to hatch the common embryo (for `embryo`)
+    - if >= 1, taken as step cout
+    - if < 1, taken as ratio of total step
 - video_*
   - fps: (float), FPS of video, set `0` to disable file saving
   - fmt: (categorical), export video file format
@@ -134,43 +146,11 @@ Manual install:
 2. (Optional) Restart the webui
 
 
-### <del>Experimental</del> (removed since v1.4)
-
-⚪ grad mode
-
-The `loss_latent` optimizes `mse_loss(current_generated_latent, target_latent)` 
-
-  - if `grad_w_latent` is positive, minimizing
-  - if `grad_w_latent` is negative, maximizing
-
-The `loss_cond` optimizes `l1_loss(current_cond, next_stage_cond)`
-
-  - if `grad_w_cond` is positive, walk towards the next stage (minimizing)
-  - if `grad_w_cond` is negative, walk away from it (maximizing)
-
-Grid search results: (`steps=100, grad_alpha=0.01, grad_iter=1, grad_meth='clip'`)
-
-| w_cond\w_latent | -1 | 0 | 1 |
-| :-: | :-: | :-: | :-: |
-| -1 | 纹理丢失色块平滑、逆向胚胎发育，最后变成圆圈堆叠成的抽象小人 | 前几步变得精致，随后纹理丢失色块平滑，但保持作画结构，中途突然高斯模糊，旋即背景失去语义，最后变成斑点图，l_grad下降 | 走到三张别的图，画风基本一致，背景变朦胧，途中震荡，最后人物没了，变得几何重复 |
-| 0 | 纹理丢失色块平滑、逆向胚胎发育，最后变成圆圈堆叠成的抽象小人，l_l1上升 | - | 走到两张别的图，画风基本一致，背景变朦胧，途中震荡，l_l1上升 |
-| 1 | 纹理丢失色块平滑、逆向胚胎发育，最后变成圆形蒙版、光栅纹理 | **近似线性插值，叠加式过渡到目标，途中震荡，l_grad下降** | 走到两张别的图，画风基本一致，背景变朦胧，最后震荡 |
-
-(*) 上表如无特殊说明，其各项 loss 变化都符合设置的优化方向  
-(**) 我们似乎应当总是令 `w_latent > 0`，而 `w_cond` 的设置似乎很玄学，这里可能遭遇了对抗样本现象(神经网络的过度线性性)……  
-
-ℹ NOTE: When 'prompt' has only single line, it will wander just **around** the initial stage, dynamically balancing `loss_latent` and `loss_cond`; this allows you to discover neighbors of your given prompt 😀
-
-⚪ replace mode
-
-This mode working on token embed input level, hence your can view `log.txt` to see how your input tokens are gradually changed.  
-⚠ Remember that comma is a normal valid token, so you might see many commas there. However, they are different when appearing at different positions within the token sequence.  
-
-The actual token replacing order might reveal some information of the token importance, might the listed '>> grad ascend' or '>> embed L1-distance ascend' give you some ideas to tune your input prompt (I wish so..)
-
-
 ### Related Projects
 
+- sd-animation:
+  - Github: [https://github.com/andreasjansson/cog-stable-diffusion](https://github.com/andreasjansson/cog-stable-diffusion)
+  - Replicate : [https://replicate.com/andreasjansson/stable-diffusion-animation](https://replicate.com/andreasjansson/stable-diffusion-animation)
 - deforum (2D/3D animation): [https://github.com/deforum-art/deforum-for-automatic1111-webui](https://github.com/deforum-art/deforum-for-automatic1111-webui)
 - sonar (k_diffuison samplers): [https://github.com/Kahsolt/stable-diffusion-webui-sonar](https://github.com/Kahsolt/stable-diffusion-webui-sonar)
 

@@ -1,55 +1,56 @@
 import os
+from enum import Enum
 from pathlib import Path
 from copy import deepcopy
-from PIL import Image
-from typing import List, Union
+from PIL.Image import Image as PILImage
+from typing import List, Tuple, Union
 from traceback import print_exc
 
 import gradio as gr
 import numpy as np
+from torch import Tensor
+import torch.nn.functional as F
 try: from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 except ImportError: print('package moviepy not installed, will not be able to generate video')
 
-import modules.scripts as scripts
-from modules.processing import Processed, StableDiffusionProcessing, StableDiffusionProcessingTxt2Img, StableDiffusionProcessingImg2Img
+from modules.scripts import Script
+from modules.shared import state, opts, sd_upscalers
 from modules.prompt_parser import ScheduledPromptConditioning, MulticondLearnedConditioning
-from modules.shared import state, opts
+from modules.processing import Processed, StableDiffusionProcessing, StableDiffusionProcessingTxt2Img, StableDiffusionProcessingImg2Img, get_fixed_seed
+from modules.images import resize_image
+from modules.sd_samplers import single_sample_to_image
+
+class Gensis(Enum):
+    FIXED      = 'fixed'
+    SUCCESSIVE = 'successive'
+    EMBRYO     = 'embryo'
+
+class VideoFormat(Enum):
+    MP4 = 'mp4'
+    GIF = 'gif'
 
 __ = lambda key, value=None: opts.data.get(f'customscript/prompt_travel.py/txt2img/{key}/value', value)
 
-DEFAULT_GENESIS        = __('Frame genesis', 'fixed')
 DEFAULT_STEPS          = __('Travel steps between stages', 30)
+DEFAULT_GENESIS        = __('Frame genesis', Gensis.FIXED.value)
 DEFAULT_DENOISE_W      = __('Denoise strength', 1.0)
+DEFAULT_EMBRYO_STEP    = __('Denoise steps for embryo', 8)
+DEFAULT_UPSCALE_METH   = __('Upscaler', 'Lanczos')
+DEFAULT_UPSCALE_RATIO  = __('Upscale ratio', 1.0)
 DEFAULT_VIDEO_FPS      = __('Video FPS', 10)
-DEFAULT_VIDEO_FMT      = __('Video file format', 'mp4')
+DEFAULT_VIDEO_FMT      = __('Video file format', VideoFormat.MP4.value)
 DEFAULT_VIDEO_PAD      = __('Pad begin/end frames', 0)
 DEFAULT_VIDEO_PICK     = __('Pick frame by slice', '')
-DEFAULT_VIDEO_RTRIM    = __('Video drop last frame', False)
 DEFAULT_DEBUG          = __('Show console debug', True)
 
-CHOICES_GENESIS        = ['fixed', 'successive']
-CHOICES_VIDEO_FMT      = ['mp4', 'gif']
+CHOICES_GENESIS   = [x.value for x in Gensis]
+CHOICES_UPSCALER  = [x.name for x in sd_upscalers]
+CHOICES_VIDEO_FMT = [x.value for x in VideoFormat]
+
 
 # ↓↓↓ the following is modified from 'modules/processing.py' ↓↓↓
 
-from modules.processing import create_infotext, decode_first_stage, get_fixed_seed
-
-import torch
-import numpy as np
-from PIL import Image
-
-from modules import devices, lowvram
-from modules import prompt_parser
-import modules.sd_hijack
-from modules.sd_hijack import model_hijack
-from modules.shared import opts, cmd_opts, state
-import modules.shared as shared
-import modules.face_restoration
-import modules.images as images
-import modules.styles
-import modules.sd_models as sd_models
-import modules.sd_vae as sd_vae
-from modules.processing import apply_overlay, apply_color_correction
+from modules.processing import *
 
 def process_images_before(p: StableDiffusionProcessing):
     try:
@@ -267,28 +268,52 @@ def process_images_cond_to_image(p: StableDiffusionProcessing, c, uc, prompts, s
 # ↑↑↑ the above is modified from 'modules/processing.py' ↑↑↑
 
 
-def spc_get_cond(c:List[List[ScheduledPromptConditioning]]) -> torch.Tensor:
+Conditioning = Union[ScheduledPromptConditioning, MulticondLearnedConditioning]
+
+def spc_get_cond(c:List[List[ScheduledPromptConditioning]]) -> Tensor:
     return c[0][0].cond
 
-def spc_replace_cond(c:List[List[ScheduledPromptConditioning]], cond: torch.Tensor) -> ScheduledPromptConditioning:
+def spc_replace_cond(c:List[List[ScheduledPromptConditioning]], cond: Tensor) -> ScheduledPromptConditioning:
     r = deepcopy(c)
     spc = r[0][0]
     r[0][0] = ScheduledPromptConditioning(spc.end_at_step, cond=cond)
     return r
 
-def mlc_get_cond(c:MulticondLearnedConditioning) -> torch.Tensor:
+def mlc_get_cond(c:MulticondLearnedConditioning) -> Tensor:
     return c.batch[0][0].schedules[0].cond      # [B=1, T=77, D=768]
 
-def mlc_replace_cond(c:MulticondLearnedConditioning, cond: torch.Tensor) -> MulticondLearnedConditioning:
+def mlc_replace_cond(c:MulticondLearnedConditioning, cond: Tensor) -> MulticondLearnedConditioning:
     r = deepcopy(c)
     spc = r.batch[0][0].schedules[0]
     r.batch[0][0].schedules[0] = ScheduledPromptConditioning(spc.end_at_step, cond=cond)
     return r
 
+def weighted_sum(A:Conditioning, B:Conditioning, alpha:float) -> Conditioning:
+    ''' linear interpolate on latent space of condition '''
 
-def update_img2img_p(p: StableDiffusionProcessing, img:Image, denoising_strength:float=0.75) -> StableDiffusionProcessingImg2Img:
+    def _get_cond(X:Conditioning) -> Tensor:
+        return mlc_get_cond(X) if isinstance(X, MulticondLearnedConditioning) else spc_get_cond(X)
+
+    def _replace_cond(X:Conditioning, condX:Tensor) -> Conditioning:
+        return mlc_replace_cond(X, condX) if isinstance(X, MulticondLearnedConditioning) else spc_replace_cond(X, condX)
+    
+    def _align_cond(condA:Tensor, condB:Tensor) -> Tuple[Tensor, Tensor]:
+        d = condA.shape[0] - condB.shape[0]
+        if   d < 0: condA = F.pad(condA, (0, 0, 0, -d))
+        elif d > 0: condB = F.pad(condB, (0, 0, 0,  d))
+        return condA, condB
+
+    condA = _get_cond(A)
+    condB = _get_cond(B)
+    condA, condB = _align_cond(condA, condB)
+    condC = (1 - alpha) * condA + (alpha) * condB
+    C = _replace_cond(A, condC)
+    return C
+
+
+def update_img2img_p(p:StableDiffusionProcessing, imgs:List[PILImage], denoising_strength:float=0.75) -> StableDiffusionProcessingImg2Img:
     if isinstance(p, StableDiffusionProcessingImg2Img):
-        p.init_images = [img]
+        p.init_images = imgs
         p.denoising_strength = denoising_strength
         return p
 
@@ -332,7 +357,7 @@ def update_img2img_p(p: StableDiffusionProcessing, img:Image, denoising_strength
         ]
         kwargs = { k: getattr(p, k) for k in dir(p) if k in KNOWN_KEYS }    # inherit params
         return StableDiffusionProcessingImg2Img(
-            init_images=[img],
+            init_images=imgs,
             denoising_strength=denoising_strength,
             **kwargs,
         )
@@ -351,8 +376,21 @@ def parse_slice(picker:str) -> Union[slice, None]:
     
     return slice(start, stop, step)
 
+def get_next_sequence_number(path:str) -> int:
+    """ Determines and returns the next sequence number to use when saving an image in the specified directory. The sequence starts at 0. """
+    result = -1
+    dir = Path(path)
+    for file in dir.iterdir():
+        if not file.is_dir(): continue
+        try:
+            num = int(file.name)
+            if num > result: result = num
+        except ValueError:
+            pass
+    return result + 1
 
-class Script(scripts.Script):
+
+class Script(Script):
 
     def title(self):
         return 'Prompt Travel'
@@ -364,55 +402,65 @@ class Script(scripts.Script):
         return True
 
     def ui(self, is_img2img):
-        with gr.Group():
-            with gr.Row():
-                steps = gr.Text(label='Travel steps between stages', value=lambda: DEFAULT_STEPS, max_lines=1)
-                denoise_strength = gr.Slider(label='Denoise strength', value=lambda: DEFAULT_DENOISE_W, minimum=0.0, maximum=1.0, visible=True)
-                genesis = gr.Radio(label='Frame genesis', value=lambda: DEFAULT_GENESIS, choices=CHOICES_GENESIS)
-    
-        with gr.Group():
-            with gr.Row():
-                video_fmt  = gr.Dropdown(label='Video file format',     value=lambda: DEFAULT_VIDEO_FMT, choices=CHOICES_VIDEO_FMT)
-                video_fps  = gr.Number  (label='Video FPS',             value=lambda: DEFAULT_VIDEO_FPS)
-                video_pad  = gr.Number  (label='Pad begin/end frames',  value=lambda: DEFAULT_VIDEO_PAD,  precision=0)
-                video_pick = gr.Text    (label='Pick frame by slice',   value=lambda: DEFAULT_VIDEO_PICK, max_lines=1)
+        with gr.Row():
+            steps   = gr.Text(label='Travel steps between stages', value=lambda: DEFAULT_STEPS, max_lines=1)
+            genesis = gr.Dropdown(label='Frame genesis', value=lambda: DEFAULT_GENESIS, choices=CHOICES_GENESIS)
+            upscale_meth  = gr.Dropdown(label='Upscaler',    value=lambda: DEFAULT_UPSCALE_METH, choices=CHOICES_UPSCALER)
+            upscale_ratio = gr.Slider(label='Upscale ratio', value=lambda: DEFAULT_UPSCALE_RATIO, minimum=1.0, maximum=4.0, step=0.1)
 
-        with gr.Group():
+        with gr.Row() as genesis_param:
+            denoise_w = gr.Slider(label='Denoise strength', value=lambda: DEFAULT_DENOISE_W, minimum=0.0, maximum=1.0, visible=False)
+            embryo_step = gr.Text(label='Denoise steps for embryo', value=lambda: DEFAULT_EMBRYO_STEP, max_lines=1, visible=False)
+
+        def switch_genesis(genesis:str):
+            show_tab = genesis != Gensis.FIXED.value
+            show_dw  = genesis == Gensis.SUCCESSIVE.value
+            show_es  = genesis == Gensis.EMBRYO.value
+            return [
+                { 'visible': show_tab, '__type__': 'update' },
+                { 'visible': show_dw,  '__type__': 'update' },
+                { 'visible': show_es,  '__type__': 'update' },
+            ]
+        genesis.change(switch_genesis, inputs=genesis, outputs=[genesis_param, denoise_w, embryo_step])
+
+        with gr.Row():
+            video_fmt  = gr.Dropdown(label='Video file format',     value=lambda: DEFAULT_VIDEO_FMT, choices=CHOICES_VIDEO_FMT)
+            video_fps  = gr.Number  (label='Video FPS',             value=lambda: DEFAULT_VIDEO_FPS)
+            video_pad  = gr.Number  (label='Pad begin/end frames',  value=lambda: DEFAULT_VIDEO_PAD,  precision=0)
+            video_pick = gr.Text    (label='Pick frame by slice',   value=lambda: DEFAULT_VIDEO_PICK, max_lines=1)
+
+        with gr.Row():
             show_debug = gr.Checkbox(label='Show console debug', value=lambda: DEFAULT_DEBUG)
 
-        return [genesis, denoise_strength, steps, 
-            video_fmt, video_fps, video_pad, video_pick,
-            show_debug]
+        return [steps, genesis, denoise_w, embryo_step,
+                upscale_meth, upscale_ratio,
+                video_fmt, video_fps, video_pad, video_pick,
+                show_debug]
     
-    def get_next_sequence_number(path):
-        """ Determines and returns the next sequence number to use when saving an image in the specified directory. The sequence starts at 0. """
-        result = -1
-        dir = Path(path)
-        for file in dir.iterdir():
-            if not file.is_dir(): continue
-            try:
-                num = int(file.name)
-                if num > result: result = num
-            except ValueError:
-                pass
-        return result + 1
-
     def run(self, p:StableDiffusionProcessing, 
-            genesis:str, denoise_strength:float, steps:str, 
+            steps:str, genesis:str, denoise_w:float, embryo_step:str,
+            upscale_meth:str, upscale_ratio:float,
             video_fmt:str, video_fps:float, video_pad:int, video_pick:str,
             show_debug:bool):
         
-        # Param check
-        if video_pad < 0: return Processed(p, [], p.seed, 'video_pad must >= 0')
-        if video_fps < 0: return Processed(p, [], p.seed, 'video_fps must >= 0')
+        # Param check & type convert
+        if video_pad < 0: return Processed(p, [], p.seed, f'video_pad must >= 0, but got {video_pad}')
+        if video_fps < 0: return Processed(p, [], p.seed, f'video_fps must >= 0, but got {video_fps}')
         try: video_slice = parse_slice(video_pick)
         except: return Processed(p, [], p.seed, 'syntax error in video_slice')
+        if genesis == Gensis.EMBRYO.value:
+            try: x = float(embryo_step)
+            except: return Processed(p, [], p.seed, f'embryo_step is not a number: {embryo_step}')
+            if x <= 0: Processed(p, [], p.seed, f'embryo_step must > 0, but got {embryo_step}')
+            embryo_step: int = round(x * p.steps if x < 1.0 else x)
+            del x
         
-        # Prepare prompts
+        # Prepare prompts & steps
         prompt_pos = p.prompt.strip()
         if not prompt_pos: return Processed(p, [], p.seed, 'positive prompt should not be empty :(')
         pos_prompts = [p.strip() for p in prompt_pos.split('\n') if p.strip()]
         if len(pos_prompts) == 1: return Processed(p, [], p.seed, 'should specify at least two lines of prompt to travel between :)')
+        if genesis == Gensis.EMBRYO.value and len(pos_prompts) > 2: return Processed(p, [], p.seed, 'currently processing with "embryo" genesis exactly takes 2 prompts :(')
         prompt_neg = p.negative_prompt.strip()
         neg_prompts = [p.strip() for p in prompt_neg.split('\n') if p.strip()]
         if len(neg_prompts) == 0: neg_prompts = ['']
@@ -420,22 +468,24 @@ class Script(scripts.Script):
         while len(pos_prompts) < n_stages: pos_prompts.append(pos_prompts[-1])
         while len(neg_prompts) < n_stages: neg_prompts.append(neg_prompts[-1])
 
-        try: steps = [int(s.strip()) for s in steps.strip().split(',')]
+        try: steps: List[int] = [int(s.strip()) for s in steps.strip().split(',')]
         except: return Processed(p, [], p.seed, f'cannot parse steps options: {steps}')
-    
         if len(steps) == 1:
             steps = [steps[0]] * (n_stages - 1)
         elif len(steps) != n_stages - 1:
-            info = (f'stage count mismatch: you have {n_stages} prompt stages, but specified {len(steps)} steps; should assure len(steps) == len(stages) - 1')
+            info = f'stage count mismatch: you have {n_stages} prompt stages, but specified {len(steps)} steps; should assure len(steps) == len(stages) - 1'
             return Processed(p, [], p.seed, info)
-        count = sum(steps) + n_stages
-        if show_debug: print(f'n_stages={n_stages}, steps={steps}')
+        n_frames = sum(steps) + n_stages
+        if show_debug:
+            print('n_stages:', n_stages)
+            print('n_frames:', n_frames)
+            print('steps:', steps)
         steps.insert(0, -1)     # fixup the first stage
 
         # Custom saving path
         travel_path = os.path.join(p.outpath_samples, 'prompt_travel')
         os.makedirs(travel_path, exist_ok=True)
-        travel_number = Script.get_next_sequence_number(travel_path)
+        travel_number = get_next_sequence_number(travel_path)
         self.log_dp = os.path.join(travel_path, f'{travel_number:05}')
         p.outpath_samples = self.log_dp
         os.makedirs(self.log_dp, exist_ok=True)
@@ -454,74 +504,69 @@ class Script(scripts.Script):
             print('subseed_strength:', p.subseed_strength)
 
         # Start job
-        state.job_count = count
-        print(f'Generating {count} images.')
+        state.job_count = n_frames
+        print(f'Generating {n_frames} images.')
 
         # Pack parameters
-        self.p                = p
-        self.pos_prompts      = pos_prompts
-        self.neg_prompts      = neg_prompts
-        self.steps            = steps
-        self.genesis          = genesis
-        self.denoise_strength = denoise_strength
-        self.show_debug       = show_debug
+        self.p           = p
+        self.pos_prompts = pos_prompts
+        self.neg_prompts = neg_prompts
+        self.steps       = steps
+        self.genesis     = genesis
+        self.denoise_w   = denoise_w
+        self.embryo_step = embryo_step
+        self.show_debug  = show_debug
+        self.n_stages    = n_stages
+        self.n_frames    = n_frames
 
         # Dispatch
         process_images_before(p)
-        images, info = self.run_linear()
+        if genesis == Gensis.EMBRYO.value: images, info = self.run_linear_embryo()
+        else: images, info = self.run_linear()
         process_images_after(p)
 
         # Save video
-        if video_fps > 0 and len(images) > 1:
+        if video_fps > 0 and len(images) > 1 and 'ImageSequenceClip' in globals():
             try:
-                seq = [np.asarray(t) for t in images]
-                if video_slice:   seq = seq[video_slice]
-                if video_pad > 0: seq = [seq[0]] * video_pad + seq + [seq[-1]] * video_pad
+                # arrange frames
+                if video_slice:   images = images[video_slice]
+                if video_pad > 0: images = [images[0]] * video_pad + images + [images[-1]] * video_pad
+
+                # upscale
+                tgt_w, tgt_h = round(p.width * upscale_ratio), round(p.height * upscale_ratio)
+                if upscale_meth != 'None' and upscale_ratio > 1.0:
+                    images = [resize_image(0, img, tgt_w, tgt_h, upscaler_name=upscale_meth) for img in images]
+
+                # export video
+                seq = [np.asarray(img) for img in images]
                 clip = ImageSequenceClip(seq, fps=video_fps)
                 fbase = os.path.join(self.log_dp, f'travel-{travel_number:05}')
-                if video_fmt == 'mp4':
-                    clip.write_videofile(fbase + '.mp4', verbose=False, audio=False)
-                elif video_fmt == 'gif':
-                    clip.write_gif(fbase + '.gif', loop=True)
-            except NameError: pass
+                if   video_fmt == VideoFormat.MP4.value: clip.write_videofile(fbase + '.mp4', verbose=False, audio=False)
+                elif video_fmt == VideoFormat.GIF.value: clip.write_gif(fbase + '.gif', loop=True)
             except: print_exc()
 
         return Processed(p, images, p.seed, info)
 
-    def run_linear(self):
-        p:StableDiffusionProcessing = self.p
-        genesis:str                 = self.genesis
-        denoise_strength:float      = self.denoise_strength
-        pos_prompts:List[str]       = self.pos_prompts
-        neg_prompts:List[str]       = self.neg_prompts
-        steps:List[int]             = self.steps
-        show_debug:bool             = self.show_debug
+    def run_linear(self) -> Tuple[List[PILImage], str]:
+        p: StableDiffusionProcessing = self.p
+        genesis: str                 = self.genesis
+        denoise_w: float             = self.denoise_w
+        pos_prompts: List[str]       = self.pos_prompts
+        neg_prompts: List[str]       = self.neg_prompts
+        steps: List[int]             = self.steps
+        show_debug: bool             = self.show_debug
+        n_stages: int                = self.n_stages
+        n_frames: int                = self.n_frames
 
-        n_stages = len(steps)
-        n_frames = sum(steps) + n_stages - 1
-        initial_info = None
-        images = []
-
-        def weighted_sum(A, B, alpha:float, kind:str) -> Union[ScheduledPromptConditioning, MulticondLearnedConditioning]:
-            ''' linear interpolate on latent space of condition '''
-            if kind == 'pos':
-                condA = mlc_get_cond(A)
-                condB = mlc_get_cond(B)
-                condC = (1 - alpha) * condA + (alpha) * condB
-                C = mlc_replace_cond(A, condC)
-            if kind == 'neg':
-                condA = spc_get_cond(A)
-                condB = spc_get_cond(B)
-                condC = (1 - alpha) * condA + (alpha) * condB
-                C = spc_replace_cond(A, condC)
-            return C
+        initial_info: str = None
+        images: List[PILImage] = []
 
         def gen_image(pos_hidden, neg_hidden, prompts, seeds, subseeds):
             nonlocal images, initial_info, p
             proc = process_images_cond_to_image(p, pos_hidden, neg_hidden, prompts, seeds, subseeds)
             if initial_info is None: initial_info = proc.info
             img = proc.images[0]
-            if genesis == 'successive': p = update_img2img_p(p, img, denoise_strength)
+            if genesis == Gensis.SUCCESSIVE.value: p = update_img2img_p(p, proc.images, denoise_w)
             images += [img]
 
         # Step 1: draw the init image
@@ -539,7 +584,6 @@ class Script(scripts.Script):
         i_frames = 1
         for i in range(1, n_stages):
             if state.interrupted: break
-            devices.torch_gc()
 
             state.job = f'{i_frames}/{n_frames}'
             state.job_no = i_frames + 1
@@ -560,11 +604,10 @@ class Script(scripts.Script):
             n_inter = steps[i] + 1
             for t in range(1, n_inter):
                 if state.interrupted: is_break_iter = True ; break
-                devices.torch_gc()
 
                 alpha = t / n_inter     # [1/T, 2/T, .. T-1/T]
-                inter_pos_hidden = weighted_sum(from_pos_hidden, to_pos_hidden, alpha, kind='pos')
-                inter_neg_hidden = weighted_sum(from_neg_hidden, to_neg_hidden, alpha, kind='neg')
+                inter_pos_hidden = weighted_sum(from_pos_hidden, to_pos_hidden, alpha)
+                inter_neg_hidden = weighted_sum(from_neg_hidden, to_neg_hidden, alpha)
                 gen_image(inter_pos_hidden, inter_neg_hidden, prompts, seeds, subseeds)
 
             if is_break_iter: break
@@ -575,4 +618,73 @@ class Script(scripts.Script):
             # move to next stage
             from_pos_hidden, from_neg_hidden = to_pos_hidden, to_neg_hidden
 
+        return images, initial_info
+
+    def run_linear_embryo(self) -> Tuple[List[PILImage], str]:
+        ''' NOTE: this procedure has special logic, we separate it from run_linear() so far '''
+
+        p: StableDiffusionProcessing = self.p
+        embryo_step: int             = self.embryo_step
+        pos_prompts: List[str]       = self.pos_prompts
+        n_frames: int                = self.steps[1] + 2
+
+        initial_info: str = None
+        images: List[PILImage] = []
+        embryo: Tensor = None       # latent image, the common half-denoised prototype of all frames
+
+        def gen_image(pos_hidden, neg_hidden, prompts, seeds, subseeds, save=True) -> List[PILImage]:
+            nonlocal initial_info, p
+            do_not_save_samples = p.do_not_save_samples
+            if not save: p.do_not_save_samples = True
+            proc = process_images_cond_to_image(p, pos_hidden, neg_hidden, prompts, seeds, subseeds)
+            p.do_not_save_samples = do_not_save_samples
+            if initial_info is None: initial_info = proc.info
+            return proc.images
+
+        from modules.script_callbacks import on_cfg_denoiser, remove_callbacks_for_function, CFGDenoiserParams
+        def get_embryo_fn(params: CFGDenoiserParams):
+            nonlocal embryo, embryo_step
+            if params.sampling_step == embryo_step:
+                embryo = params.x
+        def replace_embryo_fn(params: CFGDenoiserParams):
+            nonlocal embryo, embryo_step
+            if params.sampling_step == embryo_step:
+                params.x.data = embryo
+        class denoiser_hijack:
+            def __init__(self, callback_fn):
+                self.callback_fn = callback_fn
+            def __enter__(self):
+                on_cfg_denoiser(self.callback_fn)
+            def __exit__(self, exc_type, exc_value, exc_traceback):
+                remove_callbacks_for_function(self.callback_fn)
+
+        # Step 1: get starting & ending condition
+        p.prompt  = pos_prompts[0]
+        p.subseed = self.subseed
+        from_pos_hidden, neg_hidden, prompts, seeds, subseeds = process_images_prompt_to_cond(p)
+
+        p.prompt  = pos_prompts[1]
+        p.subseed = self.subseed
+        to_pos_hidden, neg_hidden, prompts, seeds, subseeds = process_images_prompt_to_cond(p)
+
+        # Step 2: get the condition middle-point as embryo then hatch it halfway
+        with denoiser_hijack(get_embryo_fn):
+            mid_pos_hidden = weighted_sum(from_pos_hidden, to_pos_hidden, 0.5)
+            gen_image(mid_pos_hidden, neg_hidden, prompts, seeds, subseeds, save=False)
+
+        try:
+            img:PILImage = single_sample_to_image(embryo[0])     # the data is duplicated, just get first item
+            img.save(os.path.join(self.log_dp, 'embryo.png'))
+        except: pass
+
+        # Step 3: derive the embryo towards each interpolated condition
+        with denoiser_hijack(replace_embryo_fn):
+            for t in range(0, n_frames+1):
+                if state.interrupted: break
+
+                alpha = t / n_frames     # [0, 1/T, 2/T, .. T-1/T, 1]
+                inter_pos_hidden = weighted_sum(from_pos_hidden, to_pos_hidden, alpha)
+                imgs = gen_image(inter_pos_hidden, neg_hidden, prompts, seeds, subseeds)
+                images.extend(imgs)
+        
         return images, initial_info
