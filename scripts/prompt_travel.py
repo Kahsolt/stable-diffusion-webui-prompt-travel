@@ -10,8 +10,11 @@ import gradio as gr
 import numpy as np
 from torch import Tensor
 import torch.nn.functional as F
-try: from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
-except ImportError: print('package moviepy not installed, will not be able to generate video')
+try:
+    from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
+    from moviepy.editor import concatenate_videoclips, ImageClip
+except ImportError:
+    print('package moviepy not installed, will not be able to generate video')
 
 from modules.scripts import Script
 from modules.shared import state, opts, sd_upscalers
@@ -538,8 +541,12 @@ class Script(Script):
                     images = [resize_image(0, img, tgt_w, tgt_h, upscaler_name=upscale_meth) for img in images]
 
                 # export video
-                seq = [np.asarray(img) for img in images]
-                clip = ImageSequenceClip(seq, fps=video_fps)
+                seq: List[np.ndarray] = [np.asarray(img) for img in images]
+                try:
+                    clip = ImageSequenceClip(seq, fps=video_fps)
+                except:     # images may have different size
+                    clip = concatenate_videoclips([ImageClip(img, duration=1/video_fps) for img in seq], method='compose')
+                    clip.fps = video_fps
                 fbase = os.path.join(self.log_dp, f'travel-{travel_number:05}')
                 if   video_fmt == VideoFormat.MP4.value: clip.write_videofile(fbase + '.mp4', verbose=False, audio=False)
                 elif video_fmt == VideoFormat.GIF.value: clip.write_gif(fbase + '.gif', loop=True)

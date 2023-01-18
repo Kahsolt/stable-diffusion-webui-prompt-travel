@@ -83,7 +83,7 @@ Embryo image decoded (case `i2i-e-euler_a` with `embryo_step=8`):
 
 Example above run configure:
 
-```
+```text
 Prompt:
 (((masterpiece))), highres, ((boy)), child, cat ears, white hair, red eyes, yellow bell, red cloak, barefoot, angel, [flying], egyptian
 ((masterpiece)), highres, ((girl)), loli, cat ears, light blue hair, red eyes, magical wand, barefoot, [running]
@@ -126,12 +126,9 @@ Hypernet: (this is my secret :)
   - fps: (float), FPS of video, set `0` to disable file saving
   - fmt: (categorical), export video file format
   - pad: (int), repeat beginning/ending frames, giving a in/out time
-  - pick: (string), cherry pick frames by [python slice syntax](https://www.pythoncentral.io/how-to-slice-listsarrays-and-tuples-in-python) before padding (e.g.: set `::2` to avoid non-converging ping-pong phenomenon, set `:-1` to drop non-reaching last frame)
+  - pick: (string), cherry pick frames by [python slice syntax](https://www.pythoncentral.io/how-to-slice-listsarrays-and-tuples-in-python) before padding (e.g.: set `::2` to get only even frames, set `:-1` to drop last frame)
 - debug: (bool)
   - whether show verbose debug info at console
-
-⚠ this script will NOT probably support the schedule syntax (i.e.: `[prompt:prompt:number]`), because I don't know how to interpolate between different schedule plans :(  
-⚠ max length diff for each prompts should NOT exceed `75` in token count, otherwise will only work on the first segment, cos' I also don't know how to interpolate between different-lengthed tensors 🤔  
 
 
 ### Installation
@@ -150,11 +147,10 @@ Manual install:
 
 - sd-animation:
   - Github: [https://github.com/andreasjansson/cog-stable-diffusion](https://github.com/andreasjansson/cog-stable-diffusion)
-  - Replicate : [https://replicate.com/andreasjansson/stable-diffusion-animation](https://replicate.com/andreasjansson/stable-diffusion-animation)
+  - Replicate: [https://replicate.com/andreasjansson/stable-diffusion-animation](https://replicate.com/andreasjansson/stable-diffusion-animation)
 - deforum (2D/3D animation): [https://github.com/deforum-art/deforum-for-automatic1111-webui](https://github.com/deforum-art/deforum-for-automatic1111-webui)
 - sonar (k_diffuison samplers): [https://github.com/Kahsolt/stable-diffusion-webui-sonar](https://github.com/Kahsolt/stable-diffusion-webui-sonar)
 
 ----
-
 by Armit
 2022/11/10 
