@@ -29,8 +29,9 @@ class Gensis(Enum):
     EMBRYO     = 'embryo'
 
 class VideoFormat(Enum):
-    MP4 = 'mp4'
-    GIF = 'gif'
+    MP4  = 'mp4'
+    GIF  = 'gif'
+    WEBM = 'webm'
 
 __ = lambda key, value=None: opts.data.get(f'customscript/prompt_travel.py/txt2img/{key}/value', value)
 
@@ -548,8 +549,9 @@ class Script(Script):
                     clip = concatenate_videoclips([ImageClip(img, duration=1/video_fps) for img in seq], method='compose')
                     clip.fps = video_fps
                 fbase = os.path.join(self.log_dp, f'travel-{travel_number:05}')
-                if   video_fmt == VideoFormat.MP4.value: clip.write_videofile(fbase + '.mp4', verbose=False, audio=False)
-                elif video_fmt == VideoFormat.GIF.value: clip.write_gif(fbase + '.gif', loop=True)
+                if   video_fmt == VideoFormat.MP4. value: clip.write_videofile(fbase + '.mp4',  verbose=False, audio=False)
+                elif video_fmt == VideoFormat.WEBM.value: clip.write_videofile(fbase + '.webm', verbose=False, audio=False)
+                elif video_fmt == VideoFormat.GIF. value: clip.write_gif(fbase + '.gif', loop=True)
             except: print_exc()
 
         return Processed(p, images, p.seed, info)

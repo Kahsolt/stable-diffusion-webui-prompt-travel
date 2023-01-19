@@ -145,11 +145,34 @@ Manual install:
 
 ### Related Projects
 
-- sd-animation:
+⚪ extensions that inspired this repo
+
+- animator (img2img): [https://github.com/Animator-Anon/animator_extension](https://github.com/Animator-Anon/animator_extension)
+- sd-webui-riffusion (music gen): [https://github.com/enlyth/sd-webui-riffusion](https://github.com/enlyth/sd-webui-riffusion)
+- sd-animation (half denoise + FILM):
   - Github: [https://github.com/andreasjansson/cog-stable-diffusion](https://github.com/andreasjansson/cog-stable-diffusion)
   - Replicate: [https://replicate.com/andreasjansson/stable-diffusion-animation](https://replicate.com/andreasjansson/stable-diffusion-animation)
-- deforum (2D/3D animation): [https://github.com/deforum-art/deforum-for-automatic1111-webui](https://github.com/deforum-art/deforum-for-automatic1111-webui)
+- deforum (img2img + depth model): [https://github.com/deforum-art/deforum-for-automatic1111-webui](https://github.com/deforum-art/deforum-for-automatic1111-webui)
+- seed-travel (varying seed): [https://github.com/yownas/seed_travel](https://github.com/yownas/seed_travel)
+
+⚪ third-party gives us power
+
+- image super-resoultion
+  - Real-ESRGAN: [https://github.com/xinntao/Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN)
+  - ESRGAN: [https://github.com/xinntao/ESRGAN](https://github.com/xinntao/ESRGAN)
+- video frame interpolation
+  - FILM: [https://github.com/google-research/frame-interpolation](https://github.com/google-research/frame-interpolation)
+  - RIFE:
+    - ECCV2022-RIFE: [https://github.com/megvii-research/ECCV2022-RIFE](https://github.com/megvii-research/ECCV2022-RIFE)
+    - rife-ncnn-vulkan: [https://github.com/nihui/rife-ncnn-vulkan](https://github.com/nihui/rife-ncnn-vulkan)
+    - Squirrel-RIFE: [https://github.com/Justin62628/Squirrel-RIFE](https://github.com/Justin62628/Squirrel-RIFE)
+    - Practical-RIFE: [https://github.com/hzwer/Practical-RIFE](https://github.com/hzwer/Practical-RIFE)
+
+⚪ my other experimental toy extensions
+
+- hires-fix-progressive (a progressive version of hires.fix): [https://github.com/Kahsolt/stable-diffusion-webui-hires-fix-progressive](https://github.com/Kahsolt/stable-diffusion-webui-hires-fix-progressive)
 - sonar (k_diffuison samplers): [https://github.com/Kahsolt/stable-diffusion-webui-sonar](https://github.com/Kahsolt/stable-diffusion-webui-sonar)
+- size-travel (kind of X-Y plot on image size): [https://github.com/Kahsolt/stable-diffusion-webui-size-travel](https://github.com/Kahsolt/stable-diffusion-webui-size-travel)
 
 ----
 by Armit
