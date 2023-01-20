@@ -1,0 +1,9 @@
+# meta
+.vscode/
+__pycache__/
+
+# third party tools
+tools/*
+!tools/README.md
+!tools/*.cmd
+!tools/busybox.exe

@@ -34,6 +34,7 @@ Try interpolating on the hidden vectors of conditioning prompt to make seemingly
 
 ⚪ Features
 
+- 2023/01/20: `v2.0` add optional external [post-processing pipeline](#post-processing-pipeline) to highly boost up smoothness, greate thx to [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) and [RIFE](https://github.com/nihui/rife-ncnn-vulkan)!!
 - 2023/01/16: `v1.5` add upscale options (issue #12); add 'embryo' genesis, reproducing idea of [stable-diffusion-animation](https://replicate.com/andreasjansson/stable-diffusion-animation) except [FILM](https://github.com/google-research/frame-interpolation) support (issue #11)
 - 2023/01/12: `v1.4` remove 'replace' & 'grad' mode support, due to webui's code change
 - 2022/12/11: `v1.3` work in a more 'successive' way, idea borrowed from [deforum](https://github.com/deforum-art/deforum-for-automatic1111-webui) ('genesis' option)
@@ -58,6 +59,7 @@ Try interpolating on the hidden vectors of conditioning prompt to make seemingly
   - freeze all other settings (`steps`, `sampler`, `cfg factor`, `seed`, etc.)
   - note that only the major `seed` will be forcely fixed through all processes, you can still set `subseed = -1` to allow more variances
 - export a video!
+  - follow [post-processing pipeline](#post-processing-pipeline) to get much better result 👌
 
 ⚪ Txt2Img
 
@@ -73,13 +75,18 @@ Try interpolating on the hidden vectors of conditioning prompt to make seemingly
 | Eular a | ![i2i-f-euler_a](img/i2i-f-euler_a.gif) | ![i2i-s-euler_a](img/i2i-s-euler_a.gif) | ![i2i-e-euler_a](img/i2i-e-euler_a.gif) |
 | DDIM    | ![i2i-f-ddim](img/i2i-f-ddim.gif)       | ![i2i-s-ddim](img/i2i-s-ddim.gif)       | ![i2i-e-ddim](img/i2i-e-ddim.gif)       |
 
-Reference image for img2img:
+post-processing pipeline (case `i2i-f-ddim`):
 
-![i2i-ref](img/i2i-ref.png)
+| w/o. post-processing | w/. post-processing |
+| :-: | :-: |
+| ![i2i-f-ddim](img/i2i-f-ddim.gif) | ![i2i-f-ddim-pp](img/i2i-f-ddim-pp.gif) |
 
-Embryo image decoded (case `i2i-e-euler_a` with `embryo_step=8`):
+other stuff:
 
-![embryo](img/embryo.png)
+| reference image for img2img | embryo image decoded <br/> case `i2i-e-euler_a` with `embryo_step=8` |
+| :-: | :-: |
+| ![i2i-ref](img/i2i-ref.png) | ![embryo](img/embryo.png) |
+
 
 Example above run configure:
 
@@ -106,7 +113,7 @@ Hypernet: (this is my secret :)
 - prompt: (list of strings)
 - negative prompt: (list of strings)
   - input multiple lines of prompt text
-  - we call each line of prompt a stage, usually you need at least 2 lines of text to starts travel (unless in 'grad' mode)
+  - we call each line of prompt a stage, usually you need at least 2 lines of text to starts travel
   - if len(positive_prompts) != len(negative_prompts), the shorter one's last item will be repeated to match the longer one
 - steps: (int, list of int)
   - number of images to interpolate between two stages
@@ -116,8 +123,8 @@ Hypernet: (this is my secret :)
   - `fixed`: starts from pure noise in txt2img pipeline, or from the same ref-image given in img2img pipeline
   - `successive`: starts from the last generated image (this will force txt2img turn to actually be img2img from the 2nd frame on)
   - `embryo`: starts from the same half-denoised image, see [=> How does it work?](https://replicate.com/andreasjansson/stable-diffusion-animation#readme) 
-    - (experimental): it only processes 2 lines of prompts, and does not interpolate on negative_prompt, and with no FILM postprocessing :(
-- genesis_extra_params:
+    - (experimental) it only processes 2 lines of prompts, and does not interpolate on negative_prompt :(
+- genesis_extra_params
   - denoise_strength: (float), denoise strength in img2img pipelines (for `successive`)
   - embryo_step: (int or float), steps to hatch the common embryo (for `embryo`)
     - if >= 1, taken as step cout
@@ -143,6 +150,38 @@ Manual install:
 2. (Optional) Restart the webui
 
 
+### Post-processing pipeline
+
+There are still two steps away from a really smooth and high resolution animation, namely image **super-resolution** & video **frame interpolation** (see `third-party tools` below).  
+⚠ Media data processing is intrinsic resource-exhausting, and it's also not webui's work or duty, hence we separated it out. 😃
+
+#### setup once
+
+⚪ auto install
+
+- run `tools/install.cmd`
+- if you got any errors like `Access denied.`, try run it again until you see `Done!` without errors 😂
+- you will have three components: [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan), [RIFE](https://github.com/nihui/rife-ncnn-vulkan) and [FFmpeg](https://ffmpeg.org/) installed under the [tools](tools) folder
+
+⚪ manually install
+
+- understand the `tools` folder layout => [tools/README.txt](tools/README.txt)
+  - if you indeed wanna put the tools elsewhere, modify paths in [tools/link.cmd](tools/link.cmd) and run `tools/link.cmd` 😉
+- download [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN/releases) (e.g.: `realesrgan-ncnn-vulkan-20220424-windows.zip`)
+  - (optional) download interesting seperated model checkpoints (e.g.: `realesr-animevideov3.pth`)
+- download [rife-ncnn-vulkan](https://github.com/nihui/rife-ncnn-vulkan/releases) bundle (e.g.: `rife-ncnn-vulkan-20221029-windows.zip `)
+- download [FFmpeg](https://ffmpeg.org/download.html) binary (e.g.: `ffmpeg-release-full-shared.7z` or `ffmpeg-git-full.7z`)
+
+#### run each time
+
+- check params in [postprocess.cmd](postprocess.cmd)
+- pick one way to start 😃
+  - run `postprocess.cmd path/to/<image_folder>` from command line
+  - drag & drop any image folder over `postprocess.cmd` icon
+
+ℹ Once processing finished, the explorer will be auto lauched to locate the generated file named with `synth.mp4`
+
+
 ### Related Projects
 
 ⚪ extensions that inspired this repo
@@ -155,18 +194,23 @@ Manual install:
 - deforum (img2img + depth model): [https://github.com/deforum-art/deforum-for-automatic1111-webui](https://github.com/deforum-art/deforum-for-automatic1111-webui)
 - seed-travel (varying seed): [https://github.com/yownas/seed_travel](https://github.com/yownas/seed_travel)
 
-⚪ third-party gives us power
+⚪ third-party tools
 
 - image super-resoultion
-  - Real-ESRGAN: [https://github.com/xinntao/Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN)
-  - ESRGAN: [https://github.com/xinntao/ESRGAN](https://github.com/xinntao/ESRGAN)
+  - ESRGAN:
+    - ESRGAN: [https://github.com/xinntao/ESRGAN](https://github.com/xinntao/ESRGAN)
+    - Real-ESRGAN: [https://github.com/xinntao/Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN)
+    - Real-ESRGAN-ncnn-vulkan (recommended): [https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan](https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan)
 - video frame interpolation
-  - FILM: [https://github.com/google-research/frame-interpolation](https://github.com/google-research/frame-interpolation)
+  - FILM (recommended): [https://github.com/google-research/frame-interpolation](https://github.com/google-research/frame-interpolation)
   - RIFE:
     - ECCV2022-RIFE: [https://github.com/megvii-research/ECCV2022-RIFE](https://github.com/megvii-research/ECCV2022-RIFE)
-    - rife-ncnn-vulkan: [https://github.com/nihui/rife-ncnn-vulkan](https://github.com/nihui/rife-ncnn-vulkan)
+    - rife-ncnn-vulkan (recommended): [https://github.com/nihui/rife-ncnn-vulkan](https://github.com/nihui/rife-ncnn-vulkan)
     - Squirrel-RIFE: [https://github.com/Justin62628/Squirrel-RIFE](https://github.com/Justin62628/Squirrel-RIFE)
     - Practical-RIFE: [https://github.com/hzwer/Practical-RIFE](https://github.com/hzwer/Practical-RIFE)
+- GNU tool-kits
+  - busybox: [https://www.busybox.net/](https://www.busybox.net/)
+  - ffmpeg: [https://ffmpeg.org/](https://ffmpeg.org/)
 
 ⚪ my other experimental toy extensions
 
