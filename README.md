@@ -209,11 +209,13 @@ There are still two steps away from a really smooth and high resolution animatio
     - Squirrel-RIFE: [https://github.com/Justin62628/Squirrel-RIFE](https://github.com/Justin62628/Squirrel-RIFE)
     - Practical-RIFE: [https://github.com/hzwer/Practical-RIFE](https://github.com/hzwer/Practical-RIFE)
 - GNU tool-kits
-  - busybox: [https://www.busybox.net/](https://www.busybox.net/)
-  - ffmpeg: [https://ffmpeg.org/](https://ffmpeg.org/)
+  - BusyBox: [https://www.busybox.net/](https://www.busybox.net/)
+    - BusyBox for Windows: [https://frippery.org/busybox/](https://frippery.org/busybox/)
+  - FFmpeg: [https://ffmpeg.org/](https://ffmpeg.org/)
 
 ⚪ my other experimental toy extensions
 
+- vid2vid (video2video) [https://github.com/Kahsolt/stable-diffusion-webui-vid2vid](https://github.com/Kahsolt/stable-diffusion-webui-vid2vid)
 - hires-fix-progressive (a progressive version of hires.fix): [https://github.com/Kahsolt/stable-diffusion-webui-hires-fix-progressive](https://github.com/Kahsolt/stable-diffusion-webui-hires-fix-progressive)
 - sonar (k_diffuison samplers): [https://github.com/Kahsolt/stable-diffusion-webui-sonar](https://github.com/Kahsolt/stable-diffusion-webui-sonar)
 - size-travel (kind of X-Y plot on image size): [https://github.com/Kahsolt/stable-diffusion-webui-size-travel](https://github.com/Kahsolt/stable-diffusion-webui-size-travel)

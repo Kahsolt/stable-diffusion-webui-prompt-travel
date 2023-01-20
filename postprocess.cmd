@@ -78,5 +78,6 @@ GOTO :eof
 
 :die
 ECHO ^<^< errorlevel: %ERRORLEVEL%
+PAUSE
 
 :eof

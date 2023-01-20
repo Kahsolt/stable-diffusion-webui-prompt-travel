@@ -5,7 +5,10 @@ SETLOCAL
 TITLE Install tools for post-process...
 
 SET CURL_BIN=curl.exe -L -C -
-SET UNZIP_BIN=busybox.exe unzip
+
+SET BBOX_URL=https://frippery.org/files/busybox/busybox.exe
+SET BBOX_BIN=busybox.exe
+SET UNZIP_BIN=%~dp0%BBOX_BIN% unzip
 
 SET RESR_URL=https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-windows.zip
 SET RESR_ZIP=realesrgan-ncnn-vulkan.zip
@@ -26,6 +29,11 @@ IF NOT EXIST %~dp0%DOWNLOAD_DIR% MKDIR %~dp0%DOWNLOAD_DIR%
 ATTRIB +H %~dp0%DOWNLOAD_DIR%
 
 ECHO ==================================================
+
+ECHO [0/3] download BusyBox
+IF EXIST %~dp0%BBOX_BIN% GOTO skip_bbox
+%CURL_BIN% %BBOX_URL% -o %~dp0%BBOX_BIN%
+:skip_bbox
 
 ECHO [1/3] install Real-ESRGAN
 IF EXIST %~dp0%RESR_DIR% GOTO skip_resr
@@ -80,5 +88,6 @@ GOTO :eof
 
 :die
 ECHO ^<^< errorlevel: %ERRORLEVEL%
+PAUSE
 
 :eof
