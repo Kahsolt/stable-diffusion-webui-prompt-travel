@@ -406,13 +406,13 @@ class Script(Script):
         return True
 
     def ui(self, is_img2img):
-        with gr.Row():
+        with gr.Row(variant='compact'):
             steps   = gr.Text(label='Travel steps between stages', value=lambda: DEFAULT_STEPS, max_lines=1)
             genesis = gr.Dropdown(label='Frame genesis', value=lambda: DEFAULT_GENESIS, choices=CHOICES_GENESIS)
             upscale_meth  = gr.Dropdown(label='Upscaler',    value=lambda: DEFAULT_UPSCALE_METH, choices=CHOICES_UPSCALER)
-            upscale_ratio = gr.Slider(label='Upscale ratio', value=lambda: DEFAULT_UPSCALE_RATIO, minimum=1.0, maximum=4.0, step=0.1)
+            upscale_ratio = gr.Slider(label='Upscale ratio', value=lambda: DEFAULT_UPSCALE_RATIO, minimum=1.0, maximum=16.0, step=0.1)
 
-        with gr.Row() as genesis_param:
+        with gr.Row(variant='compact') as genesis_param:
             denoise_w = gr.Slider(label='Denoise strength', value=lambda: DEFAULT_DENOISE_W, minimum=0.0, maximum=1.0, visible=False)
             embryo_step = gr.Text(label='Denoise steps for embryo', value=lambda: DEFAULT_EMBRYO_STEP, max_lines=1, visible=False)
 
@@ -427,13 +427,13 @@ class Script(Script):
             ]
         genesis.change(switch_genesis, inputs=genesis, outputs=[genesis_param, denoise_w, embryo_step])
 
-        with gr.Row():
+        with gr.Row(variant='compact'):
             video_fmt  = gr.Dropdown(label='Video file format',     value=lambda: DEFAULT_VIDEO_FMT, choices=CHOICES_VIDEO_FMT)
             video_fps  = gr.Number  (label='Video FPS',             value=lambda: DEFAULT_VIDEO_FPS)
             video_pad  = gr.Number  (label='Pad begin/end frames',  value=lambda: DEFAULT_VIDEO_PAD,  precision=0)
             video_pick = gr.Text    (label='Pick frame by slice',   value=lambda: DEFAULT_VIDEO_PICK, max_lines=1)
 
-        with gr.Row():
+        with gr.Row(variant='compact'):
             show_debug = gr.Checkbox(label='Show console debug', value=lambda: DEFAULT_DEBUG)
 
         return [steps, genesis, denoise_w, embryo_step,
@@ -537,8 +537,11 @@ class Script(Script):
                 if video_pad > 0: images = [images[0]] * video_pad + images + [images[-1]] * video_pad
 
                 # upscale
-                tgt_w, tgt_h = round(p.width * upscale_ratio), round(p.height * upscale_ratio)
                 if upscale_meth != 'None' and upscale_ratio > 1.0:
+                    if upscale_ratio > 4:      # must split into two rounds for NN model capatibility
+                        hf_w, hf_h = round(p.width * 4), round(p.height * 4)
+                        images = [resize_image(0, img, hf_w, hf_h, upscaler_name=upscale_meth) for img in images]
+                    tgt_w, tgt_h = round(p.width * upscale_ratio), round(p.height * upscale_ratio)
                     images = [resize_image(0, img, tgt_w, tgt_h, upscaler_name=upscale_meth) for img in images]
 
                 # export video

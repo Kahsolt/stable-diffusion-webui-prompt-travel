@@ -103,7 +103,7 @@ CFG scale: 7
 Clip skip: 1
 Seed: 114514
 Size: 512 x 512
-Model hash: 925997e9
+Model hash: animefull-final-pruned.ckpt
 Hypernet: (this is my secret :)
 ```
 
