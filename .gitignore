@@ -6,3 +6,6 @@ __pycache__/
 tools/*
 !tools/README.md
 !tools/*.cmd
+
+# user-wise config files
+postprocess-config.cmd

@@ -8,9 +8,11 @@ SET FFMPEG_HOME=D:\tools\ffmpeg
 
 @ECHO ON
 
-MKLINK /J %~dp0realesrgan-ncnn-vulkan %RESR_HOME%
-MKLINK /J %~dp0rife-ncnn-vulkan       %RIFE_HOME%
-MKLINK /J %~dp0ffmpeg                 %FFMPEG_HOME%
+PUSHD %~dp0
+MKLINK /J realesrgan-ncnn-vulkan %RESR_HOME%
+MKLINK /J rife-ncnn-vulkan       %RIFE_HOME%
+MKLINK /J ffmpeg                 %FFMPEG_HOME%
+POPD
 
 ECHO ^>^> Done!
 ECHO.

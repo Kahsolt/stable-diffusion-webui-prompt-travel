@@ -2,13 +2,18 @@
 @ECHO OFF
 SETLOCAL
 
-TITLE Install tools for post-process...
+REM Usage: install.cmd        install and keep .downloaded folder
+REM        install.cmd -c     install and clean .downloaded folder
 
+TITLE Install tools for post-process...
+CD %~dp0
+
+REM paths to web resources
 SET CURL_BIN=curl.exe -L -C -
 
 SET BBOX_URL=https://frippery.org/files/busybox/busybox.exe
 SET BBOX_BIN=busybox.exe
-SET UNZIP_BIN=%~dp0%BBOX_BIN% unzip
+SET UNZIP_BIN=%BBOX_BIN% unzip
 
 SET RESR_URL=https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-windows.zip
 SET RESR_ZIP=realesrgan-ncnn-vulkan.zip
@@ -24,70 +29,81 @@ SET FFMPEG_ZIP=ffmpeg.zip
 SET FFMPEG_DIR=ffmpeg
 SET FFMPEG_RDIR=ffmpeg-5.1.2-full_build-shared
 
+REM make cache tmpdir
 SET DOWNLOAD_DIR=.download
-IF NOT EXIST %~dp0%DOWNLOAD_DIR% MKDIR %~dp0%DOWNLOAD_DIR%
-ATTRIB +H %~dp0%DOWNLOAD_DIR%
+IF NOT EXIST %DOWNLOAD_DIR% MKDIR %DOWNLOAD_DIR%
+ATTRIB +H %DOWNLOAD_DIR%
 
+REM start installation
 ECHO ==================================================
 
 ECHO [0/3] download BusyBox
-IF EXIST %~dp0%BBOX_BIN% GOTO skip_bbox
-%CURL_BIN% %BBOX_URL% -o %~dp0%BBOX_BIN%
+IF EXIST %BBOX_BIN% GOTO skip_bbox
+%CURL_BIN% %BBOX_URL% -o %BBOX_BIN%
 :skip_bbox
 
+ECHO ==================================================
+
 ECHO [1/3] install Real-ESRGAN
-IF EXIST %~dp0%RESR_DIR% GOTO skip_resr
+IF EXIST %RESR_DIR% GOTO skip_resr
 IF EXIST %DOWNLOAD_DIR%\%RESR_ZIP% GOTO skip_dl_resr
 ECHO ^>^> download from %RESR_URL%
 %CURL_BIN% %RESR_URL% -o %DOWNLOAD_DIR%\%RESR_ZIP%
 IF ERRORLEVEL 1 GOTO die
 :skip_dl_resr
 ECHO ^>^> uzip %RESR_ZIP%
-MKDIR %~dp0%RESR_DIR%
-%UNZIP_BIN% %DOWNLOAD_DIR%\%RESR_ZIP% -d %~dp0%RESR_DIR%
+MKDIR %RESR_DIR%
+%UNZIP_BIN% %DOWNLOAD_DIR%\%RESR_ZIP% -d %RESR_DIR%
 IF ERRORLEVEL 1 GOTO die
 :skip_resr
+
 ECHO ==================================================
 
 ECHO [2/3] install RIFE
-IF EXIST %~dp0%RIFE_DIR% GOTO skip_rife
+IF EXIST %RIFE_DIR% GOTO skip_rife
 IF EXIST %DOWNLOAD_DIR%\%RIFE_ZIP% GOTO skip_dl_rife
 ECHO ^>^> download from %RIFE_URL%
 %CURL_BIN% %RIFE_URL% -o %DOWNLOAD_DIR%\%RIFE_ZIP%
 IF ERRORLEVEL 1 GOTO die
 :skip_dl_rife
 ECHO ^>^> uzip %RIFE_ZIP%
-%UNZIP_BIN% %DOWNLOAD_DIR%\%RIFE_ZIP% -d %~dp0
+%UNZIP_BIN% %DOWNLOAD_DIR%\%RIFE_ZIP%
 IF ERRORLEVEL 1 GOTO die
-RENAME %~dp0%RIFE_RDIR% %RIFE_DIR%
+RENAME %RIFE_RDIR% %RIFE_DIR%
 :skip_rife
+
 ECHO ==================================================
 
 ECHO [3/3] install FFmpeg
-IF EXIST %~dp0%FFMPEG_DIR% GOTO skip_ffmpeg
+IF EXIST %FFMPEG_DIR% GOTO skip_ffmpeg
 IF EXIST %DOWNLOAD_DIR%\%FFMPEG_ZIP% GOTO skip_dl_ffmpeg
 ECHO ^>^> download from %FFMPEG_URL%
 %CURL_BIN% %FFMPEG_URL% -o %DOWNLOAD_DIR%\%FFMPEG_ZIP%
 IF ERRORLEVEL 1 GOTO die
 :skip_dl_ffmpeg
 ECHO ^>^> uzip %FFMPEG_ZIP%
-%UNZIP_BIN% %DOWNLOAD_DIR%\%FFMPEG_ZIP% -d %~dp0
+%UNZIP_BIN% %DOWNLOAD_DIR%\%FFMPEG_ZIP%
 IF ERRORLEVEL 1 GOTO die
-RENAME %~dp0%FFMPEG_RDIR% %FFMPEG_DIR%
+RENAME %FFMPEG_RDIR% %FFMPEG_DIR%
 :skip_ffmpeg
+
 ECHO ==================================================
 
+REM clean cache
+IF /I "%~1"=="-c" (
+  ATTRIB -H %DOWNLOAD_DIR%
+  RMDIR /S /Q %DOWNLOAD_DIR%
+)
+
+REM finished
 ECHO ^>^> Done!
 ECHO.
+GOTO :end
 
-ATTRIB -H %~dp0%DOWNLOAD_DIR%
-RMDIR /S /Q %~dp0%DOWNLOAD_DIR%
-
-PAUSE
-GOTO :eof
-
+REM error handle
 :die
+ECHO ^<^< Error!
 ECHO ^<^< errorlevel: %ERRORLEVEL%
-PAUSE
 
-:eof
+:end
+PAUSE

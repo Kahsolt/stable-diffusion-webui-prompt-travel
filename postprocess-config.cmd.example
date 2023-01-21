@@ -1,0 +1,43 @@
+@REM Configs for postprocess.cmd
+@ECHO OFF
+
+REM Real-ESRGAN model ckpt
+REM   string, [realesr-animevideov3, realesrgan-x4plus-anime, realesrgan-x4plus]
+REM   default: realesr-animevideov3
+SET RESR_MODEL=realesr-animevideov3
+
+REM image upscale rate
+REM   int, [2, 3, 4]
+REM   default: 2
+SET RESR_UPSCALE=2
+
+REM RIFE model ckpt
+REM   string, [rife-v4.6, rife-v4, rife-v2.3, rife-anime, ...]
+REM   default: rife-v4
+SET RIFE_MODEL=rife-v4
+
+REM interpolated frame count
+REM   int, 0 means n_images x 2
+REM   default: 0
+SET RIFE_INTERP=0
+
+REM rendered video fps, higher value requires more interpolations
+REM   int, 12 ~ 60 should be fine
+REM   default: 20 (to match the default fps of prompt-travel)
+SET FPS=20
+
+
+REM time count down before task start (in seconds)
+REM   int, non-negative
+REM   default: 5
+SET WAIT_BEFORE_START=5
+
+REM auto launch explorer and locate the generated file when done
+REM   boolean, [0, 1]
+REM   default: 1
+SET EXPLORER_FLAG=1
+
+REM clean all cache files when done, saving disk usage
+REM   boolean, [0, 1]
+REM   default: 0
+SET CLEAN_FLAG=0

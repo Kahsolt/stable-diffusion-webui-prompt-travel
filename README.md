@@ -159,14 +159,14 @@ There are still two steps away from a really smooth and high resolution animatio
 
 ⚪ auto install
 
-- run `tools/install.cmd`
+- run `cd tools & install.cmd`
 - if you got any errors like `Access denied.`, try run it again until you see `Done!` without errors 😂
 - you will have three components: [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan), [RIFE](https://github.com/nihui/rife-ncnn-vulkan) and [FFmpeg](https://ffmpeg.org/) installed under the [tools](tools) folder
 
 ⚪ manually install
 
 - understand the `tools` folder layout => [tools/README.txt](tools/README.txt)
-  - if you indeed wanna put the tools elsewhere, modify paths in [tools/link.cmd](tools/link.cmd) and run `tools/link.cmd` 😉
+  - if you indeed wanna put the tools elsewhere, modify paths in [tools/link.cmd](tools/link.cmd) and run `cd tools & link.cmd` 😉
 - download [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN/releases) (e.g.: `realesrgan-ncnn-vulkan-20220424-windows.zip`)
   - (optional) download interesting seperated model checkpoints (e.g.: `realesr-animevideov3.pth`)
 - download [rife-ncnn-vulkan](https://github.com/nihui/rife-ncnn-vulkan/releases) bundle (e.g.: `rife-ncnn-vulkan-20221029-windows.zip `)
