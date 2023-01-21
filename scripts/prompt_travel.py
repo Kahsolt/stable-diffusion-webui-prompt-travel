@@ -3,7 +3,7 @@ from enum import Enum
 from pathlib import Path
 from copy import deepcopy
 from PIL.Image import Image as PILImage
-from typing import List, Tuple, Union
+from typing import List, Tuple, Union, Callable
 from traceback import print_exc
 
 import gradio as gr
@@ -17,11 +17,26 @@ except ImportError:
     print('package moviepy not installed, will not be able to generate video')
 
 from modules.scripts import Script
+from modules.ui import gr_show
 from modules.shared import state, opts, sd_upscalers
 from modules.prompt_parser import ScheduledPromptConditioning, MulticondLearnedConditioning
 from modules.processing import Processed, StableDiffusionProcessing, StableDiffusionProcessingTxt2Img, StableDiffusionProcessingImg2Img, get_fixed_seed
 from modules.images import resize_image
 from modules.sd_samplers import single_sample_to_image
+
+class Mode(Enum):
+    LINEAR  = 'linear'
+    REPLACE = 'replace'
+
+class ModeReplaceDim(Enum):
+    TOKEN   = 'token'
+    CHANNEL = 'channel'
+    RANDOM  = 'random'
+
+class ModeReplaceOrder(Enum):
+    SIMILAR   = 'similar'
+    DIFFERENT = 'different'
+    RANDOM    = 'random'
 
 class Gensis(Enum):
     FIXED      = 'fixed'
@@ -33,23 +48,47 @@ class VideoFormat(Enum):
     GIF  = 'gif'
     WEBM = 'webm'
 
-__ = lambda key, value=None: opts.data.get(f'customscript/prompt_travel.py/txt2img/{key}/value', value)
+if 'global consts':
+    __ = lambda key, value=None: opts.data.get(f'customscript/prompt_travel.py/txt2img/{key}/value', value)
 
-DEFAULT_STEPS          = __('Travel steps between stages', 30)
-DEFAULT_GENESIS        = __('Frame genesis', Gensis.FIXED.value)
-DEFAULT_DENOISE_W      = __('Denoise strength', 1.0)
-DEFAULT_EMBRYO_STEP    = __('Denoise steps for embryo', 8)
-DEFAULT_UPSCALE_METH   = __('Upscaler', 'Lanczos')
-DEFAULT_UPSCALE_RATIO  = __('Upscale ratio', 1.0)
-DEFAULT_VIDEO_FPS      = __('Video FPS', 10)
-DEFAULT_VIDEO_FMT      = __('Video file format', VideoFormat.MP4.value)
-DEFAULT_VIDEO_PAD      = __('Pad begin/end frames', 0)
-DEFAULT_VIDEO_PICK     = __('Pick frame by slice', '')
-DEFAULT_DEBUG          = __('Show console debug', True)
+    LABEL_MODE              = 'Travel mode'
+    LABEL_STEPS             = 'Travel steps between stages'
+    LABEL_GENESIS           = 'Frame genesis'
+    LABEL_DENOISE_W         = 'Denoise strength'
+    LABEL_EMBRYO_STEP       = 'Denoise steps for embryo'
+    LABEL_REPLACE_DIM       = 'Replace dimension'
+    LABEL_REPLACE_ORDER     = 'Replace order'
+    LABEL_UPSCALE_METH      = 'Upscaler'
+    LABEL_UPSCALE_RATIO     = 'Upscale ratio'
+    LABEL_VIDEO_FPS         = 'Video FPS'
+    LABEL_VIDEO_FMT         = 'Video file format'
+    LABEL_VIDEO_PAD         = 'Pad begin/end frames'
+    LABEL_VIDEO_PICK        = 'Pick frame by slice'
+    LABEL_DEBUG             = 'Show console debug'
 
-CHOICES_GENESIS   = [x.value for x in Gensis]
-CHOICES_UPSCALER  = [x.name for x in sd_upscalers]
-CHOICES_VIDEO_FMT = [x.value for x in VideoFormat]
+    DEFAULT_MODE            = __(LABEL_MODE, Mode.LINEAR.value)
+    DEFAULT_STEPS           = __(LABEL_STEPS, 30)
+    DEFAULT_GENESIS         = __(LABEL_GENESIS, Gensis.FIXED.value)
+    DEFAULT_DENOISE_W       = __(LABEL_DENOISE_W, 1.0)
+    DEFAULT_EMBRYO_STEP     = __(LABEL_EMBRYO_STEP, 8)
+    DEFAULT_REPLACE_DIM     = __(LABEL_REPLACE_DIM, ModeReplaceDim.TOKEN.value)
+    DEFAULT_REPLACE_ORDER   = __(LABEL_REPLACE_ORDER, ModeReplaceOrder.RANDOM.value)
+    DEFAULT_UPSCALE_METH    = __(LABEL_UPSCALE_METH, 'Lanczos')
+    DEFAULT_UPSCALE_RATIO   = __(LABEL_UPSCALE_RATIO, 1.0)
+    DEFAULT_VIDEO_FPS       = __(LABEL_VIDEO_FPS, 10)
+    DEFAULT_VIDEO_FMT       = __(LABEL_VIDEO_FMT, VideoFormat.MP4.value)
+    DEFAULT_VIDEO_PAD       = __(LABEL_VIDEO_PAD, 0)
+    DEFAULT_VIDEO_PICK      = __(LABEL_VIDEO_PICK, '')
+    DEFAULT_DEBUG           = __(LABEL_DEBUG, True)
+
+    CHOICES_MODE            = [x.value for x in Mode]
+    CHOICES_GENESIS         = [x.value for x in Gensis]
+    CHOICES_REPLACE_DIM     = [x.value for x in ModeReplaceDim]
+    CHOICES_REPLACE_ORDER   = [x.value for x in ModeReplaceOrder]
+    CHOICES_UPSCALER        = [x.name for x in sd_upscalers]
+    CHOICES_VIDEO_FMT       = [x.value for x in VideoFormat]
+
+    EPS = 1e-6
 
 
 # ↓↓↓ the following is modified from 'modules/processing.py' ↓↓↓
@@ -274,45 +313,91 @@ def process_images_cond_to_image(p: StableDiffusionProcessing, c, uc, prompts, s
 
 Conditioning = Union[ScheduledPromptConditioning, MulticondLearnedConditioning]
 
-def spc_get_cond(c:List[List[ScheduledPromptConditioning]]) -> Tensor:
-    return c[0][0].cond
+def cond_get(X:Conditioning) -> Tensor:
+    def spc_get_cond(c:List[List[ScheduledPromptConditioning]]) -> Tensor:
+        return c[0][0].cond
+    
+    def mlc_get_cond(c:MulticondLearnedConditioning) -> Tensor:
+        return c.batch[0][0].schedules[0].cond      # [B=1, T=77, D=768]
 
-def spc_replace_cond(c:List[List[ScheduledPromptConditioning]], cond: Tensor) -> ScheduledPromptConditioning:
-    r = deepcopy(c)
-    spc = r[0][0]
-    r[0][0] = ScheduledPromptConditioning(spc.end_at_step, cond=cond)
-    return r
+    return mlc_get_cond(X) if isinstance(X, MulticondLearnedConditioning) else spc_get_cond(X)
 
-def mlc_get_cond(c:MulticondLearnedConditioning) -> Tensor:
-    return c.batch[0][0].schedules[0].cond      # [B=1, T=77, D=768]
+def cond_replace(X:Conditioning, condX:Tensor) -> Conditioning:
+    def spc_replace_cond(c:List[List[ScheduledPromptConditioning]], cond: Tensor) -> ScheduledPromptConditioning:
+        r = deepcopy(c)
+        spc = r[0][0]
+        r[0][0] = ScheduledPromptConditioning(spc.end_at_step, cond=cond)
+        return r
 
-def mlc_replace_cond(c:MulticondLearnedConditioning, cond: Tensor) -> MulticondLearnedConditioning:
-    r = deepcopy(c)
-    spc = r.batch[0][0].schedules[0]
-    r.batch[0][0].schedules[0] = ScheduledPromptConditioning(spc.end_at_step, cond=cond)
-    return r
+    def mlc_replace_cond(c:MulticondLearnedConditioning, cond: Tensor) -> MulticondLearnedConditioning:
+        r = deepcopy(c)
+        spc = r.batch[0][0].schedules[0]
+        r.batch[0][0].schedules[0] = ScheduledPromptConditioning(spc.end_at_step, cond=cond)
+        return r
 
-def weighted_sum(A:Conditioning, B:Conditioning, alpha:float) -> Conditioning:
+    return mlc_replace_cond(X, condX) if isinstance(X, MulticondLearnedConditioning) else spc_replace_cond(X, condX)
+
+def cond_align(condA:Tensor, condB:Tensor) -> Tuple[Tensor, Tensor]:
+    d = condA.shape[0] - condB.shape[0]
+    if   d < 0: condA = F.pad(condA, (0, 0, 0, -d))
+    elif d > 0: condB = F.pad(condB, (0, 0, 0,  d))
+    return condA, condB
+    
+def wrap_get_align_replace(fn:Callable[..., Tensor]):
+    def wrapper(A:Conditioning, B:Conditioning, *args, **kwargs) -> Conditioning:
+        condA = cond_get(A)
+        condB = cond_get(B)
+        condA, condB = cond_align(condA, condB)
+        condC = fn(condA, condB, *args, **kwargs)
+        C = cond_replace(A, condC)
+        return C
+    return wrapper
+
+@wrap_get_align_replace
+def weighted_sum(condA:Tensor, condB:Tensor, alpha:float) -> Tensor:
     ''' linear interpolate on latent space of condition '''
 
-    def _get_cond(X:Conditioning) -> Tensor:
-        return mlc_get_cond(X) if isinstance(X, MulticondLearnedConditioning) else spc_get_cond(X)
+    return (1 - alpha) * condA + (alpha) * condB
 
-    def _replace_cond(X:Conditioning, condX:Tensor) -> Conditioning:
-        return mlc_replace_cond(X, condX) if isinstance(X, MulticondLearnedConditioning) else spc_replace_cond(X, condX)
-    
-    def _align_cond(condA:Tensor, condB:Tensor) -> Tuple[Tensor, Tensor]:
-        d = condA.shape[0] - condB.shape[0]
-        if   d < 0: condA = F.pad(condA, (0, 0, 0, -d))
-        elif d > 0: condB = F.pad(condB, (0, 0, 0,  d))
-        return condA, condB
+@wrap_get_align_replace
+def replace_until_match(condA:Tensor, condB:Tensor, count:int, dist:Tensor, order:str=ModeReplaceOrder.RANDOM.value) -> Tensor:
+    ''' value substite on condition tensor; will inplace modify `dist` '''
 
-    condA = _get_cond(A)
-    condB = _get_cond(B)
-    condA, condB = _align_cond(condA, condB)
-    condC = (1 - alpha) * condA + (alpha) * condB
-    C = _replace_cond(A, condC)
-    return C
+    def index_tensor_to_tuple(index:Tensor) -> Tuple[Tensor, ...]:
+        return tuple([index[..., i] for i in range(index.shape[-1])])       # tuple([nDiff], ...)
+
+    # mask: [T=77, D=768], [T=77] or [D=768]
+    mask = dist > EPS
+    # idx_diff: [nDiff, nDim=2] or [nDiff, nDim=1]
+    idx_diff = torch.nonzero(mask)
+    n_diff = len(idx_diff)
+
+    if order == ModeReplaceOrder.RANDOM.value:
+        sel = np.random.choice(range(n_diff), size=count, replace=False) if n_diff > count else slice(None)
+    else:
+        val_diff = dist[index_tensor_to_tuple(idx_diff)]    # [nDiff]
+
+        if order == ModeReplaceOrder.SIMILAR.value:
+            sorted_index = val_diff.argsort()
+        elif order == ModeReplaceOrder.DIFFERENT.value:
+            sorted_index = val_diff.argsort(descending=True)
+        else: raise ValueError(f'unkown replace_order: {order}')
+
+        sel = sorted_index[:count]
+
+    idx_diff_sel = idx_diff[sel, ...]       # [cnt] => [cnt, nDim]
+    idx_diff_sel_tp = index_tensor_to_tuple(idx_diff_sel)
+    dist[idx_diff_sel_tp] = 0.0
+    mask[idx_diff_sel_tp] = False
+
+    if mask.shape != condA.shape:   # cond.shape = [T=77, D=768]
+        mask_len = mask.shape[0]
+        if   mask_len == condA.shape[0]: mask = mask.unsqueeze(1)
+        elif mask_len == condA.shape[1]: mask = mask.unsqueeze(0)
+        else: raise ValueError(f'unknown mask.shape: {mask.shape}')
+        mask = mask.expand_as(condA)
+
+    return mask * condA + ~mask * condB
 
 
 def update_img2img_p(p:StableDiffusionProcessing, imgs:List[PILImage], denoising_strength:float=0.75) -> StableDiffusionProcessingImg2Img:
@@ -407,41 +492,51 @@ class Script(Script):
 
     def ui(self, is_img2img):
         with gr.Row(variant='compact'):
-            steps   = gr.Text(label='Travel steps between stages', value=lambda: DEFAULT_STEPS, max_lines=1)
-            genesis = gr.Dropdown(label='Frame genesis', value=lambda: DEFAULT_GENESIS, choices=CHOICES_GENESIS)
-            upscale_meth  = gr.Dropdown(label='Upscaler',    value=lambda: DEFAULT_UPSCALE_METH, choices=CHOICES_UPSCALER)
-            upscale_ratio = gr.Slider(label='Upscale ratio', value=lambda: DEFAULT_UPSCALE_RATIO, minimum=1.0, maximum=16.0, step=0.1)
+            mode = gr.Radio(label=LABEL_MODE, value=lambda: DEFAULT_MODE, choices=CHOICES_MODE)
 
-        with gr.Row(variant='compact') as genesis_param:
-            denoise_w = gr.Slider(label='Denoise strength', value=lambda: DEFAULT_DENOISE_W, minimum=0.0, maximum=1.0, visible=False)
-            embryo_step = gr.Text(label='Denoise steps for embryo', value=lambda: DEFAULT_EMBRYO_STEP, max_lines=1, visible=False)
+            replace_dim   = gr.Dropdown(label=LABEL_REPLACE_DIM,   value=lambda: DEFAULT_REPLACE_DIM,   choices=CHOICES_REPLACE_DIM, visible=False)
+            replace_order = gr.Dropdown(label=LABEL_REPLACE_ORDER, value=lambda: DEFAULT_REPLACE_ORDER, choices=CHOICES_REPLACE_ORDER, visible=False)
+
+        def switch_mode(mode:str):
+            show_rep = mode == Mode.REPLACE.value
+            return [gr_show(x) for x in [show_rep, show_rep]]
+        mode.change(switch_mode, inputs=[mode], outputs=[replace_dim, replace_order], show_progress=False)
+
+        with gr.Row(variant='compact'):
+            genesis     = gr.Dropdown(label=LABEL_GENESIS,     value=lambda: DEFAULT_GENESIS, choices=CHOICES_GENESIS)
+            denoise_w   = gr.Slider  (label=LABEL_DENOISE_W,   value=lambda: DEFAULT_DENOISE_W, minimum=0.0, maximum=1.0, visible=False)
+            embryo_step = gr.Text    (label=LABEL_EMBRYO_STEP, value=lambda: DEFAULT_EMBRYO_STEP, max_lines=1, visible=False)
 
         def switch_genesis(genesis:str):
-            show_tab = genesis != Gensis.FIXED.value
-            show_dw  = genesis == Gensis.SUCCESSIVE.value
-            show_es  = genesis == Gensis.EMBRYO.value
-            return [
-                { 'visible': show_tab, '__type__': 'update' },
-                { 'visible': show_dw,  '__type__': 'update' },
-                { 'visible': show_es,  '__type__': 'update' },
-            ]
-        genesis.change(switch_genesis, inputs=genesis, outputs=[genesis_param, denoise_w, embryo_step])
+            show_dw = genesis == Gensis.SUCCESSIVE.value    # 'successive' genesis
+            show_es = genesis == Gensis.EMBRYO    .value    # 'embryo' genesis
+            return [gr_show(x) for x in [show_dw, show_es]]
+        genesis.change(switch_genesis, inputs=[genesis], outputs=[denoise_w, embryo_step], show_progress=False)
 
         with gr.Row(variant='compact'):
-            video_fmt  = gr.Dropdown(label='Video file format',     value=lambda: DEFAULT_VIDEO_FMT, choices=CHOICES_VIDEO_FMT)
-            video_fps  = gr.Number  (label='Video FPS',             value=lambda: DEFAULT_VIDEO_FPS)
-            video_pad  = gr.Number  (label='Pad begin/end frames',  value=lambda: DEFAULT_VIDEO_PAD,  precision=0)
-            video_pick = gr.Text    (label='Pick frame by slice',   value=lambda: DEFAULT_VIDEO_PICK, max_lines=1)
+            steps         = gr.Text    (label=LABEL_STEPS,         value=lambda: DEFAULT_STEPS, max_lines=1)
+            upscale_meth  = gr.Dropdown(label=LABEL_UPSCALE_METH,  value=lambda: DEFAULT_UPSCALE_METH, choices=CHOICES_UPSCALER)
+            upscale_ratio = gr.Slider  (label=LABEL_UPSCALE_RATIO, value=lambda: DEFAULT_UPSCALE_RATIO, minimum=1.0, maximum=16.0, step=0.1)
 
         with gr.Row(variant='compact'):
-            show_debug = gr.Checkbox(label='Show console debug', value=lambda: DEFAULT_DEBUG)
+            video_fmt  = gr.Dropdown(label=LABEL_VIDEO_FMT,  value=lambda: DEFAULT_VIDEO_FMT, choices=CHOICES_VIDEO_FMT)
+            video_fps  = gr.Number  (label=LABEL_VIDEO_FPS,  value=lambda: DEFAULT_VIDEO_FPS)
+            video_pad  = gr.Number  (label=LABEL_VIDEO_PAD,  value=lambda: DEFAULT_VIDEO_PAD,  precision=0)
+            video_pick = gr.Text    (label=LABEL_VIDEO_PICK, value=lambda: DEFAULT_VIDEO_PICK, max_lines=1)
 
-        return [steps, genesis, denoise_w, embryo_step,
+        with gr.Row(variant='compact'):
+            show_debug = gr.Checkbox(label=LABEL_DEBUG, value=lambda: DEFAULT_DEBUG)
+
+        return [mode,
+                replace_dim, replace_order,
+                steps, genesis, denoise_w, embryo_step,
                 upscale_meth, upscale_ratio,
                 video_fmt, video_fps, video_pad, video_pick,
                 show_debug]
     
     def run(self, p:StableDiffusionProcessing, 
+            mode:str,
+            replace_dim:str, replace_order:str,
             steps:str, genesis:str, denoise_w:float, embryo_step:str,
             upscale_meth:str, upscale_ratio:float,
             video_fmt:str, video_fps:float, video_pad:int, video_pick:str,
@@ -512,21 +607,24 @@ class Script(Script):
         print(f'Generating {n_frames} images.')
 
         # Pack parameters
-        self.p           = p
-        self.pos_prompts = pos_prompts
-        self.neg_prompts = neg_prompts
-        self.steps       = steps
-        self.genesis     = genesis
-        self.denoise_w   = denoise_w
-        self.embryo_step = embryo_step
-        self.show_debug  = show_debug
-        self.n_stages    = n_stages
-        self.n_frames    = n_frames
+        self.p             = p
+        self.pos_prompts   = pos_prompts
+        self.neg_prompts   = neg_prompts
+        self.steps         = steps
+        self.genesis       = genesis
+        self.denoise_w     = denoise_w
+        self.embryo_step   = embryo_step
+        self.replace_dim   = replace_dim
+        self.replace_order = replace_order
+        self.show_debug    = show_debug
+        self.n_stages      = n_stages
+        self.n_frames      = n_frames
 
         # Dispatch
         process_images_before(p)
-        if genesis == Gensis.EMBRYO.value: images, info = self.run_linear_embryo()
-        else: images, info = self.run_linear()
+        runner = getattr(self, f'run_{mode}')
+        if not runner: Processed(p, [], p.seed, f'no runner found for mode: {mode}')
+        images, info = runner()
         process_images_after(p)
 
         # Save video
@@ -570,6 +668,9 @@ class Script(Script):
         n_stages: int                = self.n_stages
         n_frames: int                = self.n_frames
 
+        if genesis == Gensis.EMBRYO.value:
+            return self.run_linear_embryo()
+        
         initial_info: str = None
         images: List[PILImage] = []
 
@@ -699,4 +800,96 @@ class Script(Script):
                 imgs = gen_image(inter_pos_hidden, neg_hidden, prompts, seeds, subseeds)
                 images.extend(imgs)
         
+        return images, initial_info
+
+    def run_replace(self) -> Tuple[List[PILImage], str]:
+        ''' yet another replace method, but do replacing on the condition tensor by token dim or channel dim '''
+
+        p: StableDiffusionProcessing = self.p
+        genesis: str                 = self.genesis
+        denoise_w: float             = self.denoise_w
+        pos_prompts: List[str]       = self.pos_prompts
+        steps: List[int]             = self.steps
+        replace_dim: str             = self.replace_dim
+        replace_order: str           = self.replace_order
+        show_debug: bool             = self.show_debug
+        n_stages: int                = self.n_stages
+        n_frames: int                = self.n_frames
+
+        if genesis == Gensis.EMBRYO.value:
+            raise NotImplementedError(f'genesis {genesis!r} is only supported in linear mode currently :(')
+
+        initial_info: str = None
+        images: List[PILImage] = []
+
+        def gen_image(pos_hidden, neg_hidden, prompts, seeds, subseeds):
+            nonlocal images, initial_info, p
+            proc = process_images_cond_to_image(p, pos_hidden, neg_hidden, prompts, seeds, subseeds)
+            if initial_info is None: initial_info = proc.info
+            img = proc.images[0]
+            if genesis == Gensis.SUCCESSIVE.value: p = update_img2img_p(p, proc.images, denoise_w)
+            images += [img]
+
+        # Step 1: draw the init image
+        if show_debug:
+            print(f'[stage 1/{n_stages}]')
+            print(f'  pos prompts: {pos_prompts[0]}')
+        p.prompt          = pos_prompts[0]
+        p.subseed         = self.subseed
+        from_pos_hidden, neg_hidden, prompts, seeds, subseeds = process_images_prompt_to_cond(p)
+        gen_image(from_pos_hidden, neg_hidden, prompts, seeds, subseeds)
+        
+        # travel through stages
+        i_frames = 1
+        for i in range(1, n_stages):
+            if state.interrupted: break
+
+            state.job = f'{i_frames}/{n_frames}'
+            state.job_no = i_frames + 1
+            i_frames += 1
+
+            # only change target prompts
+            if show_debug:
+                print(f'[stage {i+1}/{n_stages}]')
+                print(f'  pos prompts: {pos_prompts[i]}')
+            p.prompt           = pos_prompts[i]
+            p.subseed          = self.subseed
+            to_pos_hidden, neg_hidden, prompts, seeds, subseeds = process_images_prompt_to_cond(p)
+
+            # ========== ↓↓↓ major differences from run_linear() ↓↓↓ ==========
+            
+            # decide change portion in each iter
+            L1 = torch.abs(cond_get(from_pos_hidden) - cond_get(to_pos_hidden))
+            if replace_dim == ModeReplaceDim.RANDOM.value:
+                dist = L1                  # [T=77, D=768]
+            elif replace_dim == ModeReplaceDim.TOKEN.value:
+                dist = L1.mean(axis=1)     # [T=77]
+            elif replace_dim == ModeReplaceDim.CHANNEL.value:
+                dist = L1.mean(axis=0)     # [D=768]
+            else: raise ValueError(f'unknown replace_dim: {replace_dim}')
+            mask = dist > EPS
+            dist = torch.where(mask, dist, 0.0)
+            n_diff = mask.sum().item()            # when value differs we have mask==True
+            n_inter = steps[i] + 1
+            replace_count = int(n_diff / n_inter) + 1    # => accumulative modifies [1/T, 2/T, .. T-1/T] of total cond
+
+            # Step 2: draw the replaced images
+            inter_pos_hidden = from_pos_hidden
+            is_break_iter = False
+            for _ in range(1, n_inter):
+                if state.interrupted: is_break_iter = True ; break
+
+                inter_pos_hidden = replace_until_match(inter_pos_hidden, to_pos_hidden, replace_count, dist=dist, order=replace_order)
+                gen_image(inter_pos_hidden, neg_hidden, prompts, seeds, subseeds)
+            
+            # ========== ↑↑↑ major differences from run_linear() ↑↑↑ ==========
+
+            if is_break_iter: break
+
+            # Step 3: draw the fianl stage
+            gen_image(to_pos_hidden, neg_hidden, prompts, seeds, subseeds)
+            
+            # move to next stage
+            from_pos_hidden = to_pos_hidden
+
         return images, initial_info

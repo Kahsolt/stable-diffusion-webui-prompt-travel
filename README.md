@@ -34,6 +34,7 @@ Try interpolating on the hidden vectors of conditioning prompt to make seemingly
 
 ⚪ Features
 
+- 2023/01/22: `v2.1` add experimental 'replace' mode again, it's not smooth interpolation
 - 2023/01/20: `v2.0` add optional external [post-processing pipeline](#post-processing-pipeline) to highly boost up smoothness, greate thx to [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) and [RIFE](https://github.com/nihui/rife-ncnn-vulkan)!!
 - 2023/01/16: `v1.5` add upscale options (issue #12); add 'embryo' genesis, reproducing idea of [stable-diffusion-animation](https://replicate.com/andreasjansson/stable-diffusion-animation) except [FILM](https://github.com/google-research/frame-interpolation) support (issue #11)
 - 2023/01/12: `v1.4` remove 'replace' & 'grad' mode support, due to webui's code change
@@ -115,6 +116,18 @@ Hypernet: (this is my secret :)
   - input multiple lines of prompt text
   - we call each line of prompt a stage, usually you need at least 2 lines of text to starts travel
   - if len(positive_prompts) != len(negative_prompts), the shorter one's last item will be repeated to match the longer one
+- mode: (categorical)
+  - `linear`: linear interpolation on condition/uncondition of CLIP output
+  - `replace`: gradually replace of CLIP output
+    - replace_dim: (categorical)
+      - `token`: per token-wise vector
+      - `channel`: per channel-wise vector
+      - `random`: per point-wise element
+    - replace_order: (categorical)
+      - `similiar`: from the most similiar first (L1 distance)
+      - `different`: from the most different first
+      - `random`: just randomly
+  - `embryo`: pre-denoise few steps, then hatch a set of image from the common embryo by linear interpolation
 - steps: (int, list of int)
   - number of images to interpolate between two stages
   - if int, constant number of travel steps

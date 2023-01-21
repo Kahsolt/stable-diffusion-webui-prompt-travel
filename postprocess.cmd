@@ -105,7 +105,6 @@ ECHO OUT_FILE     = %OUT_FILE%
 ECHO.
 
 ECHO ^>^> wait for %WAIT_BEFORE_START% seconds before start...
-echo %BBOX_BIN% sleep %WAIT_BEFORE_START%
 %BBOX_BIN% sleep %WAIT_BEFORE_START%
 IF ERRORLEVEL 1 GOTO die
 ECHO ^>^> start processing!
