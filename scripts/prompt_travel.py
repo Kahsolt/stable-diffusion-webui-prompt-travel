@@ -28,6 +28,10 @@ class Mode(Enum):
     LINEAR  = 'linear'
     REPLACE = 'replace'
 
+class LerpMethod(Enum):
+    LERP  = 'lerp'
+    SLERP = 'slerp'
+
 class ModeReplaceDim(Enum):
     TOKEN   = 'token'
     CHANNEL = 'channel'
@@ -56,6 +60,7 @@ if 'global consts':
     LABEL_GENESIS           = 'Frame genesis'
     LABEL_DENOISE_W         = 'Denoise strength'
     LABEL_EMBRYO_STEP       = 'Denoise steps for embryo'
+    LABEL_LERP_METH         = 'Linear interp method'
     LABEL_REPLACE_DIM       = 'Replace dimension'
     LABEL_REPLACE_ORDER     = 'Replace order'
     LABEL_UPSCALE_METH      = 'Upscaler'
@@ -71,6 +76,7 @@ if 'global consts':
     DEFAULT_GENESIS         = __(LABEL_GENESIS, Gensis.FIXED.value)
     DEFAULT_DENOISE_W       = __(LABEL_DENOISE_W, 1.0)
     DEFAULT_EMBRYO_STEP     = __(LABEL_EMBRYO_STEP, 8)
+    DEFAULT_LERP_METH       = __(LABEL_LERP_METH, LerpMethod.LERP.value)
     DEFAULT_REPLACE_DIM     = __(LABEL_REPLACE_DIM, ModeReplaceDim.TOKEN.value)
     DEFAULT_REPLACE_ORDER   = __(LABEL_REPLACE_ORDER, ModeReplaceOrder.RANDOM.value)
     DEFAULT_UPSCALE_METH    = __(LABEL_UPSCALE_METH, 'Lanczos')
@@ -82,6 +88,7 @@ if 'global consts':
     DEFAULT_DEBUG           = __(LABEL_DEBUG, True)
 
     CHOICES_MODE            = [x.value for x in Mode]
+    CHOICES_LERP_METH       = [x.value for x in LerpMethod]
     CHOICES_GENESIS         = [x.value for x in Gensis]
     CHOICES_REPLACE_DIM     = [x.value for x in ModeReplaceDim]
     CHOICES_REPLACE_ORDER   = [x.value for x in ModeReplaceOrder]
@@ -360,6 +367,26 @@ def weighted_sum(condA:Tensor, condB:Tensor, alpha:float) -> Tensor:
     return (1 - alpha) * condA + (alpha) * condB
 
 @wrap_get_align_replace
+def geometric_slerp(condA:Tensor, condB:Tensor, alpha:float) -> Tensor:
+    ''' spherical linear interpolation on latent space of condition, ref: https://en.wikipedia.org/wiki/Slerp '''
+
+    A_n = condA / torch.norm(condA, dim=-1, keepdim=True)   # [T=77, D=768]
+    B_n = condB / torch.norm(condB, dim=-1, keepdim=True)
+
+    dot = (A_n * B_n).sum(dim=-1, keepdim=True)     # [T=77, D=1]
+    omega = torch.acos(dot)                         # [T=77, D=1]
+    so = torch.sin(omega)                           # [T=77, D=1]
+
+    slerp = (torch.sin((1 - alpha) * omega) / so) * condA + (torch.sin(alpha * omega) / so) * condB
+
+    mask = dot > 0.9995                             # [T=77, D=1]
+    if not any(mask):
+        return slerp
+    else:
+        lerp = (1 - alpha) * condA + (alpha) * condB
+        return torch.where(mask, lerp, slerp)           # use simple lerp when angle very close to avoid NaN
+
+@wrap_get_align_replace
 def replace_until_match(condA:Tensor, condB:Tensor, count:int, dist:Tensor, order:str=ModeReplaceOrder.RANDOM.value) -> Tensor:
     ''' value substite on condition tensor; will inplace modify `dist` '''
 
@@ -492,15 +519,17 @@ class Script(Script):
 
     def ui(self, is_img2img):
         with gr.Row(variant='compact'):
-            mode = gr.Radio(label=LABEL_MODE, value=lambda: DEFAULT_MODE, choices=CHOICES_MODE)
+            mode      = gr.Radio   (label=LABEL_MODE,      value=lambda: DEFAULT_MODE,      choices=CHOICES_MODE)
+            lerp_meth = gr.Dropdown(label=LABEL_LERP_METH, value=lambda: DEFAULT_LERP_METH, choices=CHOICES_LERP_METH)
 
-            replace_dim   = gr.Dropdown(label=LABEL_REPLACE_DIM,   value=lambda: DEFAULT_REPLACE_DIM,   choices=CHOICES_REPLACE_DIM, visible=False)
+            replace_dim   = gr.Dropdown(label=LABEL_REPLACE_DIM,   value=lambda: DEFAULT_REPLACE_DIM,   choices=CHOICES_REPLACE_DIM,   visible=False)
             replace_order = gr.Dropdown(label=LABEL_REPLACE_ORDER, value=lambda: DEFAULT_REPLACE_ORDER, choices=CHOICES_REPLACE_ORDER, visible=False)
 
         def switch_mode(mode:str):
-            show_rep = mode == Mode.REPLACE.value
-            return [gr_show(x) for x in [show_rep, show_rep]]
-        mode.change(switch_mode, inputs=[mode], outputs=[replace_dim, replace_order], show_progress=False)
+            show_meth = mode == Mode.LINEAR .value 
+            show_repl = mode == Mode.REPLACE.value
+            return [gr_show(x) for x in [show_meth, show_repl, show_repl]]
+        mode.change(switch_mode, inputs=[mode], outputs=[lerp_meth, replace_dim, replace_order], show_progress=False)
 
         with gr.Row(variant='compact'):
             genesis     = gr.Dropdown(label=LABEL_GENESIS,     value=lambda: DEFAULT_GENESIS, choices=CHOICES_GENESIS)
@@ -527,7 +556,7 @@ class Script(Script):
         with gr.Row(variant='compact'):
             show_debug = gr.Checkbox(label=LABEL_DEBUG, value=lambda: DEFAULT_DEBUG)
 
-        return [mode,
+        return [mode, lerp_meth,
                 replace_dim, replace_order,
                 steps, genesis, denoise_w, embryo_step,
                 upscale_meth, upscale_ratio,
@@ -535,7 +564,7 @@ class Script(Script):
                 show_debug]
     
     def run(self, p:StableDiffusionProcessing, 
-            mode:str,
+            mode:str, lerp_meth:str,
             replace_dim:str, replace_order:str,
             steps:str, genesis:str, denoise_w:float, embryo_step:str,
             upscale_meth:str, upscale_ratio:float,
@@ -614,6 +643,7 @@ class Script(Script):
         self.genesis       = genesis
         self.denoise_w     = denoise_w
         self.embryo_step   = embryo_step
+        self.lerp_meth     = lerp_meth
         self.replace_dim   = replace_dim
         self.replace_order = replace_order
         self.show_debug    = show_debug
@@ -659,6 +689,7 @@ class Script(Script):
 
     def run_linear(self) -> Tuple[List[PILImage], str]:
         p: StableDiffusionProcessing = self.p
+        lerp_fn                      = weighted_sum if self.lerp_meth == LerpMethod.LERP.value else geometric_slerp
         genesis: str                 = self.genesis
         denoise_w: float             = self.denoise_w
         pos_prompts: List[str]       = self.pos_prompts
@@ -719,8 +750,8 @@ class Script(Script):
                 if state.interrupted: is_break_iter = True ; break
 
                 alpha = t / n_inter     # [1/T, 2/T, .. T-1/T]
-                inter_pos_hidden = weighted_sum(from_pos_hidden, to_pos_hidden, alpha)
-                inter_neg_hidden = weighted_sum(from_neg_hidden, to_neg_hidden, alpha)
+                inter_pos_hidden = lerp_fn(from_pos_hidden, to_pos_hidden, alpha)
+                inter_neg_hidden = lerp_fn(from_neg_hidden, to_neg_hidden, alpha)
                 gen_image(inter_pos_hidden, inter_neg_hidden, prompts, seeds, subseeds)
 
             if is_break_iter: break
@@ -737,6 +768,7 @@ class Script(Script):
         ''' NOTE: this procedure has special logic, we separate it from run_linear() so far '''
 
         p: StableDiffusionProcessing = self.p
+        lerp_fn                      = weighted_sum if self.lerp_meth == LerpMethod.LERP.value else geometric_slerp
         embryo_step: int             = self.embryo_step
         pos_prompts: List[str]       = self.pos_prompts
         n_frames: int                = self.steps[1] + 2
@@ -796,7 +828,7 @@ class Script(Script):
                 if state.interrupted: break
 
                 alpha = t / n_frames     # [0, 1/T, 2/T, .. T-1/T, 1]
-                inter_pos_hidden = weighted_sum(from_pos_hidden, to_pos_hidden, alpha)
+                inter_pos_hidden = lerp_fn(from_pos_hidden, to_pos_hidden, alpha)
                 imgs = gen_image(inter_pos_hidden, neg_hidden, prompts, seeds, subseeds)
                 images.extend(imgs)
         

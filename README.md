@@ -34,6 +34,7 @@ Try interpolating on the hidden vectors of conditioning prompt to make seemingly
 
 ⚪ Features
 
+- 2023/01/27: `v2.2` add 'slerp' linear interpolation method
 - 2023/01/22: `v2.1` add experimental 'replace' mode again, it's not smooth interpolation
 - 2023/01/20: `v2.0` add optional external [post-processing pipeline](#post-processing-pipeline) to highly boost up smoothness, greate thx to [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) and [RIFE](https://github.com/nihui/rife-ncnn-vulkan)!!
 - 2023/01/16: `v1.5` add upscale options (issue #12); add 'embryo' genesis, reproducing idea of [stable-diffusion-animation](https://replicate.com/andreasjansson/stable-diffusion-animation) except [FILM](https://github.com/google-research/frame-interpolation) support (issue #11)
