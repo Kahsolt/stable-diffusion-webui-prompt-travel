@@ -102,34 +102,38 @@ if 'global consts':
 
 from modules.processing import *
 
+extra_network_data = None
+
 def process_images_before(p: StableDiffusionProcessing):
     try:
         for k, v in p.override_settings.items():
             setattr(opts, k, v)
-            if k == 'sd_hypernetwork':
-                shared.reload_hypernetworks()  # make onchange call for changing hypernet
 
             if k == 'sd_model_checkpoint':
-                sd_models.reload_model_weights()  # make onchange call for changing SD model
-                p.sd_model = shared.sd_model
+                sd_models.reload_model_weights()
 
             if k == 'sd_vae':
-                sd_vae.reload_vae_weights()  # make onchange call for changing VAE
+                sd_vae.reload_vae_weights()
     except:
         pass
 
 def process_images_after(p: StableDiffusionProcessing):
     stored_opts = {k: opts.data[k] for k in p.override_settings.keys()}
 
+    # restore opts to original state
     if p.override_settings_restore_afterwards:
         for k, v in stored_opts.items():
             setattr(opts, k, v)
-            if k == 'sd_hypernetwork': shared.reload_hypernetworks()
-            if k == 'sd_model_checkpoint': sd_models.reload_model_weights()
-            if k == 'sd_vae': sd_vae.reload_vae_weights()
+            if k == 'sd_model_checkpoint':
+                sd_models.reload_model_weights()
+
+            if k == 'sd_vae':
+                sd_vae.reload_vae_weights()
 
 def process_images_prompt_to_cond(p: StableDiffusionProcessing) -> tuple:
     """this is the main loop that both txt2img and img2img use; it calls func_init once inside all the scopes and func_sample once per batch"""
+    
+    global extra_network_data
 
     if type(p.prompt) == list:
         assert(len(p.prompt) > 0)
@@ -164,12 +168,10 @@ def process_images_prompt_to_cond(p: StableDiffusionProcessing) -> tuple:
     else:
         p.all_subseeds = [int(subseed) + x for x in range(len(p.all_prompts))]
 
-    with open(os.path.join(shared.script_path, "params.txt"), "w", encoding="utf8") as file:
-        processed = Processed(p, [], p.seed, "")
-        file.write(processed.infotext(p, 0))
-
     if os.path.exists(cmd_opts.embeddings_dir) and not p.do_not_reload_embeddings:
         model_hijack.embedding_db.load_textual_inversion_embeddings()
+
+    _, extra_network_data = extra_networks.parse_prompts(p.all_prompts[0:1])
 
     if p.scripts is not None:
         p.scripts.process(p)
@@ -201,6 +203,17 @@ def process_images_prompt_to_cond(p: StableDiffusionProcessing) -> tuple:
         with devices.autocast():
             p.init(p.all_prompts, p.all_seeds, p.all_subseeds)
 
+            # for OSX, loading the model during sampling changes the generated picture, so it is loaded here
+            if shared.opts.live_previews_enable and opts.show_progress_type == "Approx NN":
+                sd_vae_approx.model()
+
+            if not p.disable_extra_networks:
+                extra_networks.activate(p, extra_network_data)
+
+        with open(os.path.join(shared.script_path, "params.txt"), "w", encoding="utf8") as file:
+            processed = Processed(p, [], p.seed, "")
+            file.write(processed.infotext(p, 0))
+
         if state.job_count == -1:
             state.job_count = p.n_iter
 
@@ -219,6 +232,8 @@ def process_images_prompt_to_cond(p: StableDiffusionProcessing) -> tuple:
         if len(prompts) == 0:
             return
 
+        prompts, _ = extra_networks.parse_prompts(prompts)
+
         if p.scripts is not None:
             p.scripts.process_batch(p, batch_number=n, prompts=prompts, seeds=seeds, subseeds=subseeds)
 
@@ -232,6 +247,8 @@ def process_images_prompt_to_cond(p: StableDiffusionProcessing) -> tuple:
         return c, uc, prompts, seeds, subseeds
 
 def process_images_cond_to_image(p: StableDiffusionProcessing, c, uc, prompts, seeds, subseeds) -> Processed:
+    global extra_network_data
+
     comments = {}
     infotexts = []
     output_images = []
@@ -244,11 +261,13 @@ def process_images_cond_to_image(p: StableDiffusionProcessing, c, uc, prompts, s
             comments[comment] = 1
     
     with torch.no_grad(), p.sd_model.ema_scope():
-        with devices.autocast():
+        
+        with devices.without_autocast() if devices.unet_needs_upcast else devices.autocast():
             samples_ddim = p.sample(conditioning=c, unconditional_conditioning=uc, seeds=seeds, subseeds=subseeds, subseed_strength=p.subseed_strength, prompts=prompts)
 
         # [B=1, C=4, H=64,  W=64] => [B=1, C=3, H=512, W=512]
         x_samples_ddim = [decode_first_stage(p.sd_model, samples_ddim[i:i+1].to(dtype=devices.dtype_vae))[0].cpu() for i in range(samples_ddim.size(0))]
+        for x in x_samples_ddim: devices.test_for_nans(x, "vae")
         x_samples_ddim = torch.stack(x_samples_ddim).float()
         x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
 
@@ -279,6 +298,11 @@ def process_images_cond_to_image(p: StableDiffusionProcessing, c, uc, prompts, s
 
             image = Image.fromarray(x_sample)
 
+            if p.scripts is not None:
+                pp = scripts.PostprocessImageArgs(image)
+                p.scripts.postprocess_image(p, pp)
+                image = pp.image
+
             if p.color_corrections is not None and i < len(p.color_corrections):
                 if opts.save and not p.do_not_save_samples and opts.save_images_before_color_correction:
                     image_without_cc = apply_overlay(image, p.paste_to, i, p.overlay_images)
@@ -305,6 +329,9 @@ def process_images_cond_to_image(p: StableDiffusionProcessing, c, uc, prompts, s
     p.color_corrections = None
     
     index_of_first_image = 0
+
+    if not p.disable_extra_networks:
+        extra_networks.deactivate(p, extra_network_data)
 
     devices.torch_gc()
 
