@@ -17,6 +17,7 @@ except ImportError:
     print('package moviepy not installed, will not be able to generate video')
 
 from modules.scripts import Script
+from modules.script_callbacks import on_before_image_saved, remove_callbacks_for_function, ImageSaveParams
 from modules.ui import gr_show
 from modules.shared import state, opts, sd_upscalers
 from modules.prompt_parser import ScheduledPromptConditioning, MulticondLearnedConditioning
@@ -677,12 +678,28 @@ class Script(Script):
         self.n_stages      = n_stages
         self.n_frames      = n_frames
 
+        # upscale
+        enable_upscale = upscale_meth != 'None' and upscale_ratio > 1.0
+        if enable_upscale:
+            tgt_w, tgt_h = round(p.width * upscale_ratio), round(p.height * upscale_ratio)
+            print(f'>> upscale: ({p.width}, {p.height}) => ({tgt_w}, {tgt_h})')
+        
+        def save_image_hijack(params:ImageSaveParams):
+            img = params.image
+            if upscale_ratio > 4:      # must split into two rounds for NN model capatibility
+                hf_w, hf_h = round(p.width * 4), round(p.height * 4)
+                img = resize_image(0, img, hf_w, hf_h, upscaler_name=upscale_meth)
+            img = resize_image(0, img, tgt_w, tgt_h, upscaler_name=upscale_meth)
+            params.image = img
+
         # Dispatch
+        if enable_upscale: on_before_image_saved(save_image_hijack)
         process_images_before(p)
         runner = getattr(self, f'run_{mode}')
         if not runner: Processed(p, [], p.seed, f'no runner found for mode: {mode}')
         images, info = runner()
         process_images_after(p)
+        if enable_upscale: remove_callbacks_for_function(save_image_hijack)
 
         # Save video
         if video_fps > 0 and len(images) > 1 and 'ImageSequenceClip' in globals():
@@ -690,14 +707,6 @@ class Script(Script):
                 # arrange frames
                 if video_slice:   images = images[video_slice]
                 if video_pad > 0: images = [images[0]] * video_pad + images + [images[-1]] * video_pad
-
-                # upscale
-                if upscale_meth != 'None' and upscale_ratio > 1.0:
-                    if upscale_ratio > 4:      # must split into two rounds for NN model capatibility
-                        hf_w, hf_h = round(p.width * 4), round(p.height * 4)
-                        images = [resize_image(0, img, hf_w, hf_h, upscaler_name=upscale_meth) for img in images]
-                    tgt_w, tgt_h = round(p.width * upscale_ratio), round(p.height * upscale_ratio)
-                    images = [resize_image(0, img, tgt_w, tgt_h, upscaler_name=upscale_meth) for img in images]
 
                 # export video
                 seq: List[np.ndarray] = [np.asarray(img) for img in images]
