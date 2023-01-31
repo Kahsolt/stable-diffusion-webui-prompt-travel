@@ -23,7 +23,7 @@ from modules.shared import state, opts, sd_upscalers
 from modules.prompt_parser import ScheduledPromptConditioning, MulticondLearnedConditioning
 from modules.processing import Processed, StableDiffusionProcessing, StableDiffusionProcessingTxt2Img, StableDiffusionProcessingImg2Img, get_fixed_seed
 from modules.images import resize_image
-from modules.sd_samplers import single_sample_to_image
+from modules.sd_samplers_common import single_sample_to_image
 
 class Mode(Enum):
     LINEAR  = 'linear'

@@ -46,12 +46,15 @@ Try interpolating on the hidden vectors of conditioning prompt to make seemingly
 
 ⚪ Fixups
 
+- 2023/01/31: keep up with webui's updates, (issue #14: `ImportError: cannot import name 'single_sample_to_image'`)
 - 2023/01/28: keep up with webui's updates, extra-networks rework
 - 2023/01/16: `v1.5` apply zero padding when condition length mismatch (issue #10: `RuntimeError: The size of tensor a (77) must match the size of tensor b (154) at non-singleton dimension 0`), typo in demo filename
 - 2023/01/12: `v1.4` keep up with webui's updates (issue #9: `AttributeError: 'FrozenCLIPEmbedderWithCustomWords' object has no attribute 'process_text'`)
 - 2022/12/13: `#bdd8bed` fixup no working when negative prompt is left empty (issue #6: `neg_prompts[-1] IndexError: List index out of range`)
 - 2022/11/27: `v1.2-fix2` keep up with webui's updates (error `ImportError: FrozenCLIPEmbedderWithCustomWords`)
 - 2022/11/20: `v1.2-fix1` keep up with webui's updates (error `AttributeError: p.all_negative_prompts[0]`)
+
+⚠ this script will NOT probably support the schedule syntax (i.e.: `[prompt:prompt:number]`), because interpolate on mutable condition requires sampler level tracing which is hard to maintain :(  
 
 
 ### How it works?
