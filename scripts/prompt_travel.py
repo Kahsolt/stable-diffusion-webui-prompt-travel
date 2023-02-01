@@ -415,7 +415,7 @@ def geometric_slerp(condA:Tensor, condB:Tensor, alpha:float) -> Tensor:
         return torch.where(mask, lerp, slerp)           # use simple lerp when angle very close to avoid NaN
 
 @wrap_get_align_replace
-def replace_until_match(condA:Tensor, condB:Tensor, count:int, dist:Tensor, order:str=ModeReplaceOrder.RANDOM.value) -> Tensor:
+def replace_until_match(condA:Tensor, condB:Tensor, count:int, dist:Tensor, order:str=ModeReplaceOrder.RANDOM) -> Tensor:
     ''' value substite on condition tensor; will inplace modify `dist` '''
 
     def index_tensor_to_tuple(index:Tensor) -> Tuple[Tensor, ...]:
@@ -427,14 +427,14 @@ def replace_until_match(condA:Tensor, condB:Tensor, count:int, dist:Tensor, orde
     idx_diff = torch.nonzero(mask)
     n_diff = len(idx_diff)
 
-    if order == ModeReplaceOrder.RANDOM.value:
+    if order == ModeReplaceOrder.RANDOM:
         sel = np.random.choice(range(n_diff), size=count, replace=False) if n_diff > count else slice(None)
     else:
         val_diff = dist[index_tensor_to_tuple(idx_diff)]    # [nDiff]
 
-        if order == ModeReplaceOrder.SIMILAR.value:
+        if order == ModeReplaceOrder.SIMILAR:
             sorted_index = val_diff.argsort()
-        elif order == ModeReplaceOrder.DIFFERENT.value:
+        elif order == ModeReplaceOrder.DIFFERENT:
             sorted_index = val_diff.argsort(descending=True)
         else: raise ValueError(f'unkown replace_order: {order}')
 
@@ -554,8 +554,8 @@ class Script(Script):
             replace_order = gr.Dropdown(label=LABEL_REPLACE_ORDER, value=lambda: DEFAULT_REPLACE_ORDER, choices=CHOICES_REPLACE_ORDER, visible=False)
 
         def switch_mode(mode:str):
-            show_meth = mode == Mode.LINEAR .value 
-            show_repl = mode == Mode.REPLACE.value
+            show_meth = Mode(mode) == Mode.LINEAR
+            show_repl = Mode(mode) == Mode.REPLACE
             return [gr_show(x) for x in [show_meth, show_repl, show_repl]]
         mode.change(switch_mode, inputs=[mode], outputs=[lerp_meth, replace_dim, replace_order], show_progress=False)
 
@@ -565,8 +565,8 @@ class Script(Script):
             embryo_step = gr.Text    (label=LABEL_EMBRYO_STEP, value=lambda: DEFAULT_EMBRYO_STEP, max_lines=1, visible=False)
 
         def switch_genesis(genesis:str):
-            show_dw = genesis == Gensis.SUCCESSIVE.value    # 'successive' genesis
-            show_es = genesis == Gensis.EMBRYO    .value    # 'embryo' genesis
+            show_dw = Gensis(genesis) == Gensis.SUCCESSIVE    # 'successive' genesis
+            show_es = Gensis(genesis) == Gensis.EMBRYO        # 'embryo' genesis
             return [gr_show(x) for x in [show_dw, show_es]]
         genesis.change(switch_genesis, inputs=[genesis], outputs=[denoise_w, embryo_step], show_progress=False)
 
@@ -599,24 +599,32 @@ class Script(Script):
             video_fmt:str, video_fps:float, video_pad:int, video_pick:str,
             show_debug:bool):
         
+        # enum looup
+        mode: Mode                      = Mode(mode)
+        lerp_meth: LerpMethod           = LerpMethod(lerp_meth)
+        replace_dim: ModeReplaceDim     = ModeReplaceDim(replace_dim)
+        replace_order: ModeReplaceOrder = ModeReplaceOrder(replace_order)
+        genesis: Gensis                 = Gensis(genesis)
+        video_fmt: VideoFormat          = VideoFormat(video_fmt)
+
         # Param check & type convert
         if video_pad < 0: return Processed(p, [], p.seed, f'video_pad must >= 0, but got {video_pad}')
         if video_fps < 0: return Processed(p, [], p.seed, f'video_fps must >= 0, but got {video_fps}')
         try: video_slice = parse_slice(video_pick)
         except: return Processed(p, [], p.seed, 'syntax error in video_slice')
-        if genesis == Gensis.EMBRYO.value:
+        if genesis == Gensis.EMBRYO:
             try: x = float(embryo_step)
             except: return Processed(p, [], p.seed, f'embryo_step is not a number: {embryo_step}')
             if x <= 0: Processed(p, [], p.seed, f'embryo_step must > 0, but got {embryo_step}')
             embryo_step: int = round(x * p.steps if x < 1.0 else x)
             del x
-        
+
         # Prepare prompts & steps
         prompt_pos = p.prompt.strip()
         if not prompt_pos: return Processed(p, [], p.seed, 'positive prompt should not be empty :(')
         pos_prompts = [p.strip() for p in prompt_pos.split('\n') if p.strip()]
         if len(pos_prompts) == 1: return Processed(p, [], p.seed, 'should specify at least two lines of prompt to travel between :)')
-        if genesis == Gensis.EMBRYO.value and len(pos_prompts) > 2: return Processed(p, [], p.seed, 'currently processing with "embryo" genesis exactly takes 2 prompts :(')
+        if genesis == Gensis.EMBRYO and len(pos_prompts) > 2: return Processed(p, [], p.seed, 'currently processing with "embryo" genesis exactly takes 2 prompts :(')
         prompt_neg = p.negative_prompt.strip()
         neg_prompts = [p.strip() for p in prompt_neg.split('\n') if p.strip()]
         if len(neg_prompts) == 0: neg_prompts = ['']
@@ -664,7 +672,6 @@ class Script(Script):
         print(f'Generating {n_frames} images.')
 
         # Pack parameters
-        self.p             = p
         self.pos_prompts   = pos_prompts
         self.neg_prompts   = neg_prompts
         self.steps         = steps
@@ -695,9 +702,9 @@ class Script(Script):
         # Dispatch
         if enable_upscale: on_before_image_saved(save_image_hijack)
         process_images_before(p)
-        runner = getattr(self, f'run_{mode}')
-        if not runner: Processed(p, [], p.seed, f'no runner found for mode: {mode}')
-        images, info = runner()
+        runner = getattr(self, f'run_{mode.value}')
+        if not runner: Processed(p, [], p.seed, f'no runner found for mode: {mode.value}')
+        images, info = runner(p)
         process_images_after(p)
         if enable_upscale: remove_callbacks_for_function(save_image_hijack)
 
@@ -716,27 +723,26 @@ class Script(Script):
                     clip = concatenate_videoclips([ImageClip(img, duration=1/video_fps) for img in seq], method='compose')
                     clip.fps = video_fps
                 fbase = os.path.join(self.log_dp, f'travel-{travel_number:05}')
-                if   video_fmt == VideoFormat.MP4. value: clip.write_videofile(fbase + '.mp4',  verbose=False, audio=False)
-                elif video_fmt == VideoFormat.WEBM.value: clip.write_videofile(fbase + '.webm', verbose=False, audio=False)
-                elif video_fmt == VideoFormat.GIF. value: clip.write_gif(fbase + '.gif', loop=True)
+                if   video_fmt == VideoFormat.MP4:  clip.write_videofile(fbase + '.mp4',  verbose=False, audio=False)
+                elif video_fmt == VideoFormat.WEBM: clip.write_videofile(fbase + '.webm', verbose=False, audio=False)
+                elif video_fmt == VideoFormat.GIF:  clip.write_gif(fbase + '.gif', loop=True)
             except: print_exc()
 
         return Processed(p, images, p.seed, info)
 
-    def run_linear(self) -> Tuple[List[PILImage], str]:
-        p: StableDiffusionProcessing = self.p
-        lerp_fn                      = weighted_sum if self.lerp_meth == LerpMethod.LERP.value else geometric_slerp
-        genesis: str                 = self.genesis
-        denoise_w: float             = self.denoise_w
-        pos_prompts: List[str]       = self.pos_prompts
-        neg_prompts: List[str]       = self.neg_prompts
-        steps: List[int]             = self.steps
-        show_debug: bool             = self.show_debug
-        n_stages: int                = self.n_stages
-        n_frames: int                = self.n_frames
+    def run_linear(self, p: StableDiffusionProcessing) -> Tuple[List[PILImage], str]:
+        lerp_fn     = weighted_sum if self.lerp_meth == LerpMethod.LERP else geometric_slerp
+        genesis     = self.genesis
+        denoise_w   = self.denoise_w
+        pos_prompts = self.pos_prompts
+        neg_prompts = self.neg_prompts
+        steps       = self.steps
+        show_debug  = self.show_debug
+        n_stages    = self.n_stages
+        n_frames    = self.n_frames
 
-        if genesis == Gensis.EMBRYO.value:
-            return self.run_linear_embryo()
+        if genesis == Gensis.EMBRYO:
+            return self.run_linear_embryo(p)
         
         initial_info: str = None
         images: List[PILImage] = []
@@ -746,7 +752,7 @@ class Script(Script):
             proc = process_images_cond_to_image(p, pos_hidden, neg_hidden, prompts, seeds, subseeds)
             if initial_info is None: initial_info = proc.info
             img = proc.images[0]
-            if genesis == Gensis.SUCCESSIVE.value: p = update_img2img_p(p, proc.images, denoise_w)
+            if genesis == Gensis.SUCCESSIVE: p = update_img2img_p(p, proc.images, denoise_w)
             images += [img]
 
         # Step 1: draw the init image
@@ -800,14 +806,13 @@ class Script(Script):
 
         return images, initial_info
 
-    def run_linear_embryo(self) -> Tuple[List[PILImage], str]:
+    def run_linear_embryo(self, p: StableDiffusionProcessing) -> Tuple[List[PILImage], str]:
         ''' NOTE: this procedure has special logic, we separate it from run_linear() so far '''
 
-        p: StableDiffusionProcessing = self.p
-        lerp_fn                      = weighted_sum if self.lerp_meth == LerpMethod.LERP.value else geometric_slerp
-        embryo_step: int             = self.embryo_step
-        pos_prompts: List[str]       = self.pos_prompts
-        n_frames: int                = self.steps[1] + 2
+        lerp_fn     = weighted_sum if self.lerp_meth == LerpMethod.LERP else geometric_slerp
+        embryo_step = self.embryo_step
+        pos_prompts = self.pos_prompts
+        n_frames    = self.steps[1] + 2
 
         initial_info: str = None
         images: List[PILImage] = []
@@ -870,22 +875,21 @@ class Script(Script):
         
         return images, initial_info
 
-    def run_replace(self) -> Tuple[List[PILImage], str]:
+    def run_replace(self, p: StableDiffusionProcessing) -> Tuple[List[PILImage], str]:
         ''' yet another replace method, but do replacing on the condition tensor by token dim or channel dim '''
 
-        p: StableDiffusionProcessing = self.p
-        genesis: str                 = self.genesis
-        denoise_w: float             = self.denoise_w
-        pos_prompts: List[str]       = self.pos_prompts
-        steps: List[int]             = self.steps
-        replace_dim: str             = self.replace_dim
-        replace_order: str           = self.replace_order
-        show_debug: bool             = self.show_debug
-        n_stages: int                = self.n_stages
-        n_frames: int                = self.n_frames
+        genesis       = self.genesis
+        denoise_w     = self.denoise_w
+        pos_prompts   = self.pos_prompts
+        steps         = self.steps
+        replace_dim   = self.replace_dim
+        replace_order = self.replace_order
+        show_debug    = self.show_debug
+        n_stages      = self.n_stages
+        n_frames      = self.n_frames
 
-        if genesis == Gensis.EMBRYO.value:
-            raise NotImplementedError(f'genesis {genesis!r} is only supported in linear mode currently :(')
+        if genesis == Gensis.EMBRYO:
+            raise NotImplementedError(f'genesis {genesis.value!r} is only supported in linear mode currently :(')
 
         initial_info: str = None
         images: List[PILImage] = []
@@ -895,7 +899,7 @@ class Script(Script):
             proc = process_images_cond_to_image(p, pos_hidden, neg_hidden, prompts, seeds, subseeds)
             if initial_info is None: initial_info = proc.info
             img = proc.images[0]
-            if genesis == Gensis.SUCCESSIVE.value: p = update_img2img_p(p, proc.images, denoise_w)
+            if genesis == Gensis.SUCCESSIVE: p = update_img2img_p(p, proc.images, denoise_w)
             images += [img]
 
         # Step 1: draw the init image
@@ -928,11 +932,11 @@ class Script(Script):
             
             # decide change portion in each iter
             L1 = torch.abs(cond_get(from_pos_hidden) - cond_get(to_pos_hidden))
-            if replace_dim == ModeReplaceDim.RANDOM.value:
+            if   replace_dim == ModeReplaceDim.RANDOM:
                 dist = L1                  # [T=77, D=768]
-            elif replace_dim == ModeReplaceDim.TOKEN.value:
+            elif replace_dim == ModeReplaceDim.TOKEN:
                 dist = L1.mean(axis=1)     # [T=77]
-            elif replace_dim == ModeReplaceDim.CHANNEL.value:
+            elif replace_dim == ModeReplaceDim.CHANNEL:
                 dist = L1.mean(axis=0)     # [D=768]
             else: raise ValueError(f'unknown replace_dim: {replace_dim}')
             mask = dist > EPS
