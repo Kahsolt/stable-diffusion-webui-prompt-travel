@@ -17,7 +17,7 @@ except ImportError:
     print('package moviepy not installed, will not be able to generate video')
 
 from modules.scripts import Script
-from modules.script_callbacks import on_before_image_saved, remove_callbacks_for_function, ImageSaveParams
+from modules.script_callbacks import on_before_image_saved, ImageSaveParams, on_cfg_denoiser, CFGDenoiserParams, remove_callbacks_for_function
 from modules.ui import gr_show
 from modules.shared import state, opts, sd_upscalers
 from modules.prompt_parser import ScheduledPromptConditioning, MulticondLearnedConditioning
@@ -685,28 +685,34 @@ class Script(Script):
         self.n_stages      = n_stages
         self.n_frames      = n_frames
 
-        # upscale
-        enable_upscale = upscale_meth != 'None' and upscale_ratio > 1.0
-        if enable_upscale:
-            tgt_w, tgt_h = round(p.width * upscale_ratio), round(p.height * upscale_ratio)
-            print(f'>> upscale: ({p.width}, {p.height}) => ({tgt_w}, {tgt_h})')
-        
         def save_image_hijack(params:ImageSaveParams):
-            img = params.image
-            if upscale_ratio > 4:      # must split into two rounds for NN model capatibility
-                hf_w, hf_h = round(p.width * 4), round(p.height * 4)
-                img = resize_image(0, img, hf_w, hf_h, upscaler_name=upscale_meth)
-            img = resize_image(0, img, tgt_w, tgt_h, upscaler_name=upscale_meth)
-            params.image = img
+            enable_upscale = upscale_meth != 'None' and upscale_ratio > 1.0
+            if enable_upscale:
+                tgt_w, tgt_h = round(p.width * upscale_ratio), round(p.height * upscale_ratio)
+                if show_debug: print(f'>> upscale: ({p.width}, {p.height}) => ({tgt_w}, {tgt_h})')
+
+                img = params.image
+                if upscale_ratio > 4:      # must split into two rounds for NN model capatibility
+                    hf_w, hf_h = round(p.width * 4), round(p.height * 4)
+                    img = resize_image(0, img, hf_w, hf_h, upscaler_name=upscale_meth)
+                img = resize_image(0, img, tgt_w, tgt_h, upscaler_name=upscale_meth)
+                params.image = img
+
+        def cfg_denoiser_hijack(params:CFGDenoiserParams):
+            if show_debug:
+                print('sigma:', params.sigma[-1].item())
 
         # Dispatch
-        if enable_upscale: on_before_image_saved(save_image_hijack)
-        process_images_before(p)
         runner = getattr(self, f'run_{mode.value}')
         if not runner: Processed(p, [], p.seed, f'no runner found for mode: {mode.value}')
+
+        on_before_image_saved(save_image_hijack)
+        on_cfg_denoiser(cfg_denoiser_hijack)
+        process_images_before(p)
         images, info = runner(p)
         process_images_after(p)
-        if enable_upscale: remove_callbacks_for_function(save_image_hijack)
+        remove_callbacks_for_function(cfg_denoiser_hijack)
+        remove_callbacks_for_function(save_image_hijack)
 
         # Save video
         if video_fps > 0 and len(images) > 1 and 'ImageSequenceClip' in globals():
@@ -719,7 +725,7 @@ class Script(Script):
                 seq: List[np.ndarray] = [np.asarray(img) for img in images]
                 try:
                     clip = ImageSequenceClip(seq, fps=video_fps)
-                except:     # images may have different size
+                except:     # images may have different size (small probability due to upscaler)
                     clip = concatenate_videoclips([ImageClip(img, duration=1/video_fps) for img in seq], method='compose')
                     clip.fps = video_fps
                 fbase = os.path.join(self.log_dp, f'travel-{travel_number:05}')

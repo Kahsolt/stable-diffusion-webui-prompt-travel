@@ -54,7 +54,8 @@ Try interpolating on the hidden vectors of conditioning prompt to make seemingly
 - 2022/11/27: `v1.2-fix2` keep up with webui's updates (error `ImportError: FrozenCLIPEmbedderWithCustomWords`)
 - 2022/11/20: `v1.2-fix1` keep up with webui's updates (error `AttributeError: p.all_negative_prompts[0]`)
 
-⚠ this script will NOT probably support the schedule syntax (i.e.: `[prompt:prompt:number]`), because interpolate on mutable condition requires sampler level tracing which is hard to maintain :(  
+⚠ this script will NOT probably support the schedule syntax (i.e.: `[prompt:prompt:number]`), because interpolate on mutable conditions requires sampler level tracing which is hard to maintain :(  
+⚠ this script will NOT probably work together with `hires.fix` due to some inner conceptual/logical conflict of `denoising_strength`, you can alternatively perform batch-upscale then batch-img2img.  
 
 
 ### How it works?
