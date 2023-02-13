@@ -34,6 +34,7 @@ Try interpolating on the hidden vectors of conditioning prompt to make seemingly
 
 ⚪ Features
 
+- 2023/02/14: `v2.3` integrate basic function of [depth-image-io](https://github.com/AnonymousCervine/depth-image-io-for-SDWebui) for depth2img models
 - 2023/01/27: `v2.2` add 'slerp' linear interpolation method
 - 2023/01/22: `v2.1` add experimental 'replace' mode again, it's not smooth interpolation
 - 2023/01/20: `v2.0` add optional external [post-processing pipeline](#post-processing-pipeline) to highly boost up smoothness, greate thx to [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) and [RIFE](https://github.com/nihui/rife-ncnn-vulkan)!!
@@ -205,6 +206,7 @@ There are still two steps away from a really smooth and high resolution animatio
 
 ⚪ extensions that inspired this repo
 
+- depth-image-io (custom depth2img): [https://github.com/AnonymousCervine/depth-image-io-for-SDWebui](https://github.com/AnonymousCervine/depth-image-io-for-SDWebui)
 - animator (img2img): [https://github.com/Animator-Anon/animator_extension](https://github.com/Animator-Anon/animator_extension)
 - sd-webui-riffusion (music gen): [https://github.com/enlyth/sd-webui-riffusion](https://github.com/enlyth/sd-webui-riffusion)
 - sd-animation (half denoise + FILM):

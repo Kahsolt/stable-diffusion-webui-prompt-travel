@@ -3,7 +3,7 @@ from enum import Enum
 from pathlib import Path
 from copy import deepcopy
 from PIL.Image import Image as PILImage
-from typing import List, Tuple, Union, Callable
+from typing import List, Tuple, Union, Callable, Optional
 from traceback import print_exc
 
 import gradio as gr
@@ -64,13 +64,18 @@ if 'global consts':
     LABEL_LERP_METH         = 'Linear interp method'
     LABEL_REPLACE_DIM       = 'Replace dimension'
     LABEL_REPLACE_ORDER     = 'Replace order'
-    LABEL_UPSCALE_METH      = 'Upscaler'
-    LABEL_UPSCALE_RATIO     = 'Upscale ratio'
+    LABEL_VIDEO             = 'Ext. export video'
     LABEL_VIDEO_FPS         = 'Video FPS'
     LABEL_VIDEO_FMT         = 'Video file format'
     LABEL_VIDEO_PAD         = 'Pad begin/end frames'
     LABEL_VIDEO_PICK        = 'Pick frame by slice'
-    LABEL_DEBUG             = 'Show console debug'
+    LABEL_UPSCALE           = 'Ext. upscale'
+    LABEL_UPSCALE_METH      = 'Upscaler'
+    LABEL_UPSCALE_RATIO     = 'Upscale ratio'
+    LABEL_UPSCALE_WIDTH     = 'Upscale width'
+    LABEL_UPSCALE_HEIGHT    = 'Upscale height'
+    LABEL_DEPTH             = 'Ext. depth-image-io (for depth2img models)'
+    LABEL_DEPTH_IMG         = 'Depth image file'
 
     DEFAULT_MODE            = __(LABEL_MODE, Mode.LINEAR.value)
     DEFAULT_STEPS           = __(LABEL_STEPS, 30)
@@ -80,13 +85,17 @@ if 'global consts':
     DEFAULT_LERP_METH       = __(LABEL_LERP_METH, LerpMethod.LERP.value)
     DEFAULT_REPLACE_DIM     = __(LABEL_REPLACE_DIM, ModeReplaceDim.TOKEN.value)
     DEFAULT_REPLACE_ORDER   = __(LABEL_REPLACE_ORDER, ModeReplaceOrder.RANDOM.value)
+    DEFAULT_UPSCALE         = __(LABEL_UPSCALE, False)
     DEFAULT_UPSCALE_METH    = __(LABEL_UPSCALE_METH, 'Lanczos')
-    DEFAULT_UPSCALE_RATIO   = __(LABEL_UPSCALE_RATIO, 1.0)
+    DEFAULT_UPSCALE_RATIO   = __(LABEL_UPSCALE_RATIO, 2.0)
+    DEFAULT_UPSCALE_WIDTH   = __(LABEL_UPSCALE_WIDTH, 0)
+    DEFAULT_UPSCALE_HEIGHT  = __(LABEL_UPSCALE_HEIGHT, 0)
+    DEFAULT_VIDEO           = __(LABEL_VIDEO, True)
     DEFAULT_VIDEO_FPS       = __(LABEL_VIDEO_FPS, 10)
     DEFAULT_VIDEO_FMT       = __(LABEL_VIDEO_FMT, VideoFormat.MP4.value)
     DEFAULT_VIDEO_PAD       = __(LABEL_VIDEO_PAD, 0)
     DEFAULT_VIDEO_PICK      = __(LABEL_VIDEO_PICK, '')
-    DEFAULT_DEBUG           = __(LABEL_DEBUG, True)
+    DEFAULT_DEPTH           = __(LABEL_DEPTH, False)
 
     CHOICES_MODE            = [x.value for x in Mode]
     CHOICES_LERP_METH       = [x.value for x in LerpMethod]
@@ -455,6 +464,19 @@ def replace_until_match(condA:Tensor, condB:Tensor, count:int, dist:Tensor, orde
     return mask * condA + ~mask * condB
 
 
+def get_next_sequence_number(path:str) -> int:
+    """ Determines and returns the next sequence number to use when saving an image in the specified directory. The sequence starts at 0. """
+    result = -1
+    dir = Path(path)
+    for file in dir.iterdir():
+        if not file.is_dir(): continue
+        try:
+            num = int(file.name)
+            if num > result: result = num
+        except ValueError:
+            pass
+    return result + 1
+
 def update_img2img_p(p:StableDiffusionProcessing, imgs:List[PILImage], denoising_strength:float=0.75) -> StableDiffusionProcessingImg2Img:
     if isinstance(p, StableDiffusionProcessingImg2Img):
         p.init_images = imgs
@@ -506,7 +528,7 @@ def update_img2img_p(p:StableDiffusionProcessing, imgs:List[PILImage], denoising
             **kwargs,
         )
 
-def parse_slice(picker:str) -> Union[slice, None]:
+def parse_slice(picker:str) -> Optional[slice]:
     if not picker.strip(): return None
     
     to_int = lambda s: None if not s else int(s)
@@ -520,18 +542,19 @@ def parse_slice(picker:str) -> Union[slice, None]:
     
     return slice(start, stop, step)
 
-def get_next_sequence_number(path:str) -> int:
-    """ Determines and returns the next sequence number to use when saving an image in the specified directory. The sequence starts at 0. """
-    result = -1
-    dir = Path(path)
-    for file in dir.iterdir():
-        if not file.is_dir(): continue
-        try:
-            num = int(file.name)
-            if num > result: result = num
-        except ValueError:
-            pass
-    return result + 1
+def parse_resolution(p:StableDiffusionProcessing, upscale_meth:str, upscale_ratio:float, upscale_width:int, upscale_height:int) -> Tuple[bool, Tuple[int, int]]:
+    if upscale_meth == 'None':
+        return False, (p.width, p.height)
+
+    if upscale_width == upscale_height == 0:
+        if upscale_ratio == 1.0:
+            return False, (p.width, p.height)
+        else:
+            return True, (round(p.width * upscale_ratio), round(p.height * upscale_ratio))
+    else:
+        if upscale_width  == 0: upscale_width  = round(p.width  * upscale_height / p.height)
+        if upscale_height == 0: upscale_height = round(p.height * upscale_width  / p.width)
+        return (p.width != upscale_width and p.height != upscale_height), (upscale_width, upscale_height)
 
 
 class Script(Script):
@@ -546,60 +569,70 @@ class Script(Script):
         return True
 
     def ui(self, is_img2img):
-        with gr.Row(variant='compact'):
-            mode      = gr.Radio   (label=LABEL_MODE,      value=lambda: DEFAULT_MODE,      choices=CHOICES_MODE)
-            lerp_meth = gr.Dropdown(label=LABEL_LERP_METH, value=lambda: DEFAULT_LERP_METH, choices=CHOICES_LERP_METH)
-
+        with gr.Row(variant='compact') as tab_mode:
+            mode          = gr.Radio   (label=LABEL_MODE,          value=lambda: DEFAULT_MODE,          choices=CHOICES_MODE)
+            lerp_meth     = gr.Dropdown(label=LABEL_LERP_METH,     value=lambda: DEFAULT_LERP_METH,     choices=CHOICES_LERP_METH)
             replace_dim   = gr.Dropdown(label=LABEL_REPLACE_DIM,   value=lambda: DEFAULT_REPLACE_DIM,   choices=CHOICES_REPLACE_DIM,   visible=False)
             replace_order = gr.Dropdown(label=LABEL_REPLACE_ORDER, value=lambda: DEFAULT_REPLACE_ORDER, choices=CHOICES_REPLACE_ORDER, visible=False)
 
-        def switch_mode(mode:str):
-            show_meth = Mode(mode) == Mode.LINEAR
-            show_repl = Mode(mode) == Mode.REPLACE
-            return [gr_show(x) for x in [show_meth, show_repl, show_repl]]
-        mode.change(switch_mode, inputs=[mode], outputs=[lerp_meth, replace_dim, replace_order], show_progress=False)
+            def switch_mode(mode:str):
+                show_meth = Mode(mode) == Mode.LINEAR
+                show_repl = Mode(mode) == Mode.REPLACE
+                return [gr_show(x) for x in [show_meth, show_repl, show_repl]]
+            mode.change(switch_mode, inputs=[mode], outputs=[lerp_meth, replace_dim, replace_order], show_progress=False)
 
-        with gr.Row(variant='compact'):
+        with gr.Row(variant='compact') as tab_param:
+            steps       = gr.Text    (label=LABEL_STEPS,       value=lambda: DEFAULT_STEPS, max_lines=1)
             genesis     = gr.Dropdown(label=LABEL_GENESIS,     value=lambda: DEFAULT_GENESIS, choices=CHOICES_GENESIS)
             denoise_w   = gr.Slider  (label=LABEL_DENOISE_W,   value=lambda: DEFAULT_DENOISE_W, minimum=0.0, maximum=1.0, visible=False)
             embryo_step = gr.Text    (label=LABEL_EMBRYO_STEP, value=lambda: DEFAULT_EMBRYO_STEP, max_lines=1, visible=False)
 
-        def switch_genesis(genesis:str):
-            show_dw = Gensis(genesis) == Gensis.SUCCESSIVE    # 'successive' genesis
-            show_es = Gensis(genesis) == Gensis.EMBRYO        # 'embryo' genesis
-            return [gr_show(x) for x in [show_dw, show_es]]
-        genesis.change(switch_genesis, inputs=[genesis], outputs=[denoise_w, embryo_step], show_progress=False)
+            def switch_genesis(genesis:str):
+                show_dw = Gensis(genesis) == Gensis.SUCCESSIVE    # 'successive' genesis
+                show_es = Gensis(genesis) == Gensis.EMBRYO        # 'embryo' genesis
+                return [gr_show(x) for x in [show_dw, show_es]]
+            genesis.change(switch_genesis, inputs=[genesis], outputs=[denoise_w, embryo_step], show_progress=False)
 
-        with gr.Row(variant='compact'):
-            steps         = gr.Text    (label=LABEL_STEPS,         value=lambda: DEFAULT_STEPS, max_lines=1)
-            upscale_meth  = gr.Dropdown(label=LABEL_UPSCALE_METH,  value=lambda: DEFAULT_UPSCALE_METH, choices=CHOICES_UPSCALER)
-            upscale_ratio = gr.Slider  (label=LABEL_UPSCALE_RATIO, value=lambda: DEFAULT_UPSCALE_RATIO, minimum=1.0, maximum=16.0, step=0.1)
+        with gr.Row(variant='compact', visible=DEFAULT_DEPTH) as tab_ext_depth:
+            depth_img = gr.Image(label=LABEL_DEPTH_IMG, source='upload', type='pil', image_mode=None)
 
-        with gr.Row(variant='compact'):
+        with gr.Row(variant='compact', visible=DEFAULT_UPSCALE) as tab_ext_upscale:
+            upscale_meth   = gr.Dropdown(label=LABEL_UPSCALE_METH,   value=lambda: DEFAULT_UPSCALE_METH,   choices=CHOICES_UPSCALER)
+            upscale_ratio  = gr.Slider  (label=LABEL_UPSCALE_RATIO,  value=lambda: DEFAULT_UPSCALE_RATIO,  minimum=1.0, maximum=16.0, step=0.1)
+            upscale_width  = gr.Slider  (label=LABEL_UPSCALE_WIDTH,  value=lambda: DEFAULT_UPSCALE_WIDTH,  minimum=0, maximum=2048, step=8)
+            upscale_height = gr.Slider  (label=LABEL_UPSCALE_HEIGHT, value=lambda: DEFAULT_UPSCALE_HEIGHT, minimum=0, maximum=2048, step=8)
+
+        with gr.Row(variant='compact', visible=DEFAULT_VIDEO) as tab_ext_video:
             video_fmt  = gr.Dropdown(label=LABEL_VIDEO_FMT,  value=lambda: DEFAULT_VIDEO_FMT, choices=CHOICES_VIDEO_FMT)
             video_fps  = gr.Number  (label=LABEL_VIDEO_FPS,  value=lambda: DEFAULT_VIDEO_FPS)
             video_pad  = gr.Number  (label=LABEL_VIDEO_PAD,  value=lambda: DEFAULT_VIDEO_PAD,  precision=0)
             video_pick = gr.Text    (label=LABEL_VIDEO_PICK, value=lambda: DEFAULT_VIDEO_PICK, max_lines=1)
 
-        with gr.Row(variant='compact'):
-            show_debug = gr.Checkbox(label=LABEL_DEBUG, value=lambda: DEFAULT_DEBUG)
-
-        return [mode, lerp_meth,
-                replace_dim, replace_order,
-                steps, genesis, denoise_w, embryo_step,
-                upscale_meth, upscale_ratio,
-                video_fmt, video_fps, video_pad, video_pick,
-                show_debug]
-    
-    def run(self, p:StableDiffusionProcessing, 
-            mode:str, lerp_meth:str,
-            replace_dim:str, replace_order:str,
-            steps:str, genesis:str, denoise_w:float, embryo_step:str,
-            upscale_meth:str, upscale_ratio:float,
-            video_fmt:str, video_fps:float, video_pad:int, video_pick:str,
-            show_debug:bool):
+        with gr.Row(variant='compact') as tab_ext:
+            ext_video   = gr.Checkbox(label=LABEL_VIDEO,   value=lambda: DEFAULT_VIDEO) 
+            ext_upscale = gr.Checkbox(label=LABEL_UPSCALE, value=lambda: DEFAULT_UPSCALE) 
+            ext_depth   = gr.Checkbox(label=LABEL_DEPTH,   value=lambda: DEFAULT_DEPTH)
         
-        # enum looup
+            ext_video  .change(fn=lambda x: gr_show(x), inputs=ext_video,   outputs=tab_ext_video,   show_progress=False)
+            ext_upscale.change(fn=lambda x: gr_show(x), inputs=ext_upscale, outputs=tab_ext_upscale, show_progress=False)
+            ext_depth  .change(fn=lambda x: gr_show(x), inputs=ext_depth,   outputs=tab_ext_depth,   show_progress=False)
+
+        return [mode, lerp_meth, replace_dim, replace_order,
+                steps, genesis, denoise_w, embryo_step,
+                depth_img,
+                upscale_meth, upscale_ratio, upscale_width, upscale_height,
+                video_fmt, video_fps, video_pad, video_pick,
+                ext_video, ext_upscale, ext_depth]
+
+    def run(self, p:StableDiffusionProcessing, 
+            mode:str, lerp_meth:str, replace_dim:str, replace_order:str,
+            steps:str, genesis:str, denoise_w:float, embryo_step:str,
+            depth_img:PILImage,
+            upscale_meth:str, upscale_ratio:float, upscale_width:int, upscale_height:int,
+            video_fmt:str, video_fps:float, video_pad:int, video_pick:str,
+            ext_video:bool, ext_upscale:bool, ext_depth:bool):
+        
+        # enum lookup
         mode: Mode                      = Mode(mode)
         lerp_meth: LerpMethod           = LerpMethod(lerp_meth)
         replace_dim: ModeReplaceDim     = ModeReplaceDim(replace_dim)
@@ -608,10 +641,11 @@ class Script(Script):
         video_fmt: VideoFormat          = VideoFormat(video_fmt)
 
         # Param check & type convert
-        if video_pad < 0: return Processed(p, [], p.seed, f'video_pad must >= 0, but got {video_pad}')
-        if video_fps < 0: return Processed(p, [], p.seed, f'video_fps must >= 0, but got {video_fps}')
-        try: video_slice = parse_slice(video_pick)
-        except: return Processed(p, [], p.seed, 'syntax error in video_slice')
+        if ext_video:
+            if video_pad <  0: return Processed(p, [], p.seed, f'video_pad must >= 0, but got {video_pad}')
+            if video_fps <= 0: return Processed(p, [], p.seed, f'video_fps must > 0, but got {video_fps}')
+            try: video_slice = parse_slice(video_pick)
+            except: return Processed(p, [], p.seed, 'syntax error in video_slice')
         if genesis == Gensis.EMBRYO:
             try: x = float(embryo_step)
             except: return Processed(p, [], p.seed, f'embryo_step is not a number: {embryo_step}')
@@ -640,7 +674,7 @@ class Script(Script):
             info = f'stage count mismatch: you have {n_stages} prompt stages, but specified {len(steps)} steps; should assure len(steps) == len(stages) - 1'
             return Processed(p, [], p.seed, info)
         n_frames = sum(steps) + n_stages
-        if show_debug:
+        if 'show_debug':
             print('n_stages:', n_stages)
             print('n_frames:', n_frames)
             print('steps:', steps)
@@ -662,14 +696,13 @@ class Script(Script):
         # Random unified const seed
         p.seed = get_fixed_seed(p.seed)     # fix it to assure all processes using the same major seed
         self.subseed = p.subseed            # stash it to allow using random subseed for each process (when -1)
-        if show_debug:
+        if 'show_debug':
             print('seed:',             p.seed)
             print('subseed:',          p.subseed)
             print('subseed_strength:', p.subseed_strength)
 
         # Start job
         state.job_count = n_frames
-        print(f'Generating {n_frames} images.')
 
         # Pack parameters
         self.pos_prompts   = pos_prompts
@@ -681,41 +714,44 @@ class Script(Script):
         self.lerp_meth     = lerp_meth
         self.replace_dim   = replace_dim
         self.replace_order = replace_order
-        self.show_debug    = show_debug
         self.n_stages      = n_stages
         self.n_frames      = n_frames
 
         def save_image_hijack(params:ImageSaveParams):
-            enable_upscale = upscale_meth != 'None' and upscale_ratio > 1.0
-            if enable_upscale:
-                tgt_w, tgt_h = round(p.width * upscale_ratio), round(p.height * upscale_ratio)
-                if show_debug: print(f'>> upscale: ({p.width}, {p.height}) => ({tgt_w}, {tgt_h})')
+            need_upscale, (tgt_w, tgt_h) = parse_resolution(p, upscale_meth, upscale_ratio, upscale_width, upscale_height)
+            if need_upscale:
+                if 'show_debug': print(f'>> upscale: ({p.width}, {p.height}) => ({tgt_w}, {tgt_h})')
 
-                img = params.image
-                if upscale_ratio > 4:      # must split into two rounds for NN model capatibility
+                img: PILImage = params.image
+                if max(tgt_w / p.width, tgt_h / p.height) > 4:      # must split into two rounds for NN model capatibility
                     hf_w, hf_h = round(p.width * 4), round(p.height * 4)
                     img = resize_image(0, img, hf_w, hf_h, upscaler_name=upscale_meth)
                 img = resize_image(0, img, tgt_w, tgt_h, upscaler_name=upscale_meth)
                 params.image = img
 
         def cfg_denoiser_hijack(params:CFGDenoiserParams):
-            if show_debug:
+            if not 'show_debug':
                 print('sigma:', params.sigma[-1].item())
 
         # Dispatch
         runner = getattr(self, f'run_{mode.value}')
         if not runner: Processed(p, [], p.seed, f'no runner found for mode: {mode.value}')
 
-        on_before_image_saved(save_image_hijack)
-        on_cfg_denoiser(cfg_denoiser_hijack)
-        process_images_before(p)
-        images, info = runner(p)
-        process_images_after(p)
-        remove_callbacks_for_function(cfg_denoiser_hijack)
-        remove_callbacks_for_function(save_image_hijack)
+        try:
+            if ext_depth: self.ext_depth_preprocess(p, depth_img)
+            if ext_upscale: on_before_image_saved(save_image_hijack)
+            if False: on_cfg_denoiser(cfg_denoiser_hijack)
+            process_images_before(p)
+
+            images, info = runner(p)
+        finally:
+            process_images_after(p)
+            if False: remove_callbacks_for_function(cfg_denoiser_hijack)
+            if ext_upscale: remove_callbacks_for_function(save_image_hijack)
+            if ext_depth: self.ext_depth_postprocess(p, depth_img)
 
         # Save video
-        if video_fps > 0 and len(images) > 1 and 'ImageSequenceClip' in globals():
+        if ext_video and len(images) > 1 and 'ImageSequenceClip' in globals():
             try:
                 # arrange frames
                 if video_slice:   images = images[video_slice]
@@ -731,7 +767,7 @@ class Script(Script):
                 fbase = os.path.join(self.log_dp, f'travel-{travel_number:05}')
                 if   video_fmt == VideoFormat.MP4:  clip.write_videofile(fbase + '.mp4',  verbose=False, audio=False)
                 elif video_fmt == VideoFormat.WEBM: clip.write_videofile(fbase + '.webm', verbose=False, audio=False)
-                elif video_fmt == VideoFormat.GIF:  clip.write_gif(fbase + '.gif', loop=True)
+                elif video_fmt == VideoFormat.GIF:  clip.write_gif      (fbase + '.gif',  loop=True)
             except: print_exc()
 
         return Processed(p, images, p.seed, info)
@@ -743,7 +779,6 @@ class Script(Script):
         pos_prompts = self.pos_prompts
         neg_prompts = self.neg_prompts
         steps       = self.steps
-        show_debug  = self.show_debug
         n_stages    = self.n_stages
         n_frames    = self.n_frames
 
@@ -762,7 +797,7 @@ class Script(Script):
             images += [img]
 
         # Step 1: draw the init image
-        if show_debug:
+        if 'show_debug':
             print(f'[stage 1/{n_stages}]')
             print(f'  pos prompts: {pos_prompts[0]}')
             print(f'  neg prompts: {neg_prompts[0]}')
@@ -782,7 +817,7 @@ class Script(Script):
             i_frames += 1
 
             # only change target prompts
-            if show_debug:
+            if 'show_debug':
                 print(f'[stage {i+1}/{n_stages}]')
                 print(f'  pos prompts: {pos_prompts[i]}')
                 print(f'  neg prompts: {neg_prompts[i]}')
@@ -890,7 +925,6 @@ class Script(Script):
         steps         = self.steps
         replace_dim   = self.replace_dim
         replace_order = self.replace_order
-        show_debug    = self.show_debug
         n_stages      = self.n_stages
         n_frames      = self.n_frames
 
@@ -909,7 +943,7 @@ class Script(Script):
             images += [img]
 
         # Step 1: draw the init image
-        if show_debug:
+        if 'show_debug':
             print(f'[stage 1/{n_stages}]')
             print(f'  pos prompts: {pos_prompts[0]}')
         p.prompt          = pos_prompts[0]
@@ -927,7 +961,7 @@ class Script(Script):
             i_frames += 1
 
             # only change target prompts
-            if show_debug:
+            if 'show_debug':
                 print(f'[stage {i+1}/{n_stages}]')
                 print(f'  pos prompts: {pos_prompts[i]}')
             p.prompt           = pos_prompts[i]
@@ -971,3 +1005,45 @@ class Script(Script):
             from_pos_hidden = to_pos_hidden
 
         return images, initial_info
+
+    def ext_depth_preprocess(self, p: StableDiffusionProcessing, depth_img: PILImage):  # copy from repo `AnonymousCervine/depth-image-io-for-SDWebui`
+        from types import MethodType
+
+        def sanitize_pil_image_mode(img):
+            invalid_modes = {'P', 'CMYK', 'HSV'}
+            if img.mode in invalid_modes:
+                img = img.convert(mode='RGB')
+            return img
+
+        def alt_depth_image_conditioning(self, source_image):
+            with devices.autocast():
+                conditioning_image = self.sd_model.get_first_stage_encoding(self.sd_model.encode_first_stage(source_image))
+            depth_data = np.array(sanitize_pil_image_mode(depth_img))
+
+            if len(np.shape(depth_data)) == 2:
+                depth_data = rearrange(depth_data, "h w -> 1 1 h w")
+            else:
+                depth_data = rearrange(depth_data, "h w c -> c 1 1 h w")[0]
+            depth_data = torch.from_numpy(depth_data).to(device=shared.device).to(dtype=torch.float32)
+            depth_data = repeat(depth_data, "1 ... -> n ...", n=self.batch_size)
+            
+            conditioning = torch.nn.functional.interpolate(
+                depth_data,
+                size=conditioning_image.shape[2:],
+                mode="bicubic",
+                align_corners=False,
+            )
+            (depth_min, depth_max) = torch.aminmax(conditioning)
+            conditioning = 2. * (conditioning - depth_min) / (depth_max - depth_min) - 1.
+            return conditioning
+        
+        p.depth2img_image_conditioning = MethodType(alt_depth_image_conditioning, p)
+        
+        def alt_txt2img_image_conditioning(self, x, width=None, height=None):
+            fake_img = torch.zeros(1, 3, height or self.height, width or self.width).to(shared.device).type(self.sd_model.dtype)
+            return self.depth2img_image_conditioning(fake_img)
+
+        p.txt2img_image_conditioning = MethodType(alt_txt2img_image_conditioning, p)
+
+    def ext_depth_postprocess(self, p: StableDiffusionProcessing, depth_img: PILImage):
+        depth_img.close()
