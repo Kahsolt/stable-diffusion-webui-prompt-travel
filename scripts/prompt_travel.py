@@ -113,22 +113,24 @@ if 'global consts':
 from modules.processing import *
 
 extra_network_data = None
+stored_opts = None
 
 def process_images_before(p: StableDiffusionProcessing):
+    global stored_opts
+    stored_opts = {k: opts.data[k] for k in p.override_settings.keys()}
+
     try:
         for k, v in p.override_settings.items():
             setattr(opts, k, v)
-
             if k == 'sd_model_checkpoint':
                 sd_models.reload_model_weights()
-
             if k == 'sd_vae':
                 sd_vae.reload_vae_weights()
     except:
         pass
 
 def process_images_after(p: StableDiffusionProcessing):
-    stored_opts = {k: opts.data[k] for k in p.override_settings.keys()}
+    global stored_opts
 
     # restore opts to original state
     if p.override_settings_restore_afterwards:
@@ -136,7 +138,6 @@ def process_images_after(p: StableDiffusionProcessing):
             setattr(opts, k, v)
             if k == 'sd_model_checkpoint':
                 sd_models.reload_model_weights()
-
             if k == 'sd_vae':
                 sd_vae.reload_vae_weights()
 
@@ -181,8 +182,6 @@ def process_images_prompt_to_cond(p: StableDiffusionProcessing) -> tuple:
     if os.path.exists(cmd_opts.embeddings_dir) and not p.do_not_reload_embeddings:
         model_hijack.embedding_db.load_textual_inversion_embeddings()
 
-    _, extra_network_data = extra_networks.parse_prompts(p.all_prompts[0:1])
-
     if p.scripts is not None:
         p.scripts.process(p)
 
@@ -217,23 +216,7 @@ def process_images_prompt_to_cond(p: StableDiffusionProcessing) -> tuple:
             if shared.opts.live_previews_enable and opts.show_progress_type == "Approx NN":
                 sd_vae_approx.model()
 
-            if not p.disable_extra_networks:
-                extra_networks.activate(p, extra_network_data)
-
-        with open(os.path.join(shared.script_path, "params.txt"), "w", encoding="utf8") as file:
-            processed = Processed(p, [], p.seed, "")
-            file.write(processed.infotext(p, 0))
-
-        if state.job_count == -1:
-            state.job_count = p.n_iter
-
-        if state.skipped:
-            state.skipped = False
-        
-        if state.interrupted:
-            return
-
-        n = 0
+        p.iteration = n = 0
         prompts = p.all_prompts[n * p.batch_size:(n + 1) * p.batch_size]
         negative_prompts = p.all_negative_prompts[n * p.batch_size:(n + 1) * p.batch_size]
         seeds = p.all_seeds[n * p.batch_size:(n + 1) * p.batch_size]
@@ -242,17 +225,31 @@ def process_images_prompt_to_cond(p: StableDiffusionProcessing) -> tuple:
         if len(prompts) == 0:
             return
 
-        prompts, _ = extra_networks.parse_prompts(prompts)
+        prompts, extra_network_data = extra_networks.parse_prompts(prompts)
+
+        if p.scripts is not None:
+            p.scripts.before_process_batch(p, batch_number=n, prompts=prompts, seeds=seeds, subseeds=subseeds)
+
+        if not p.disable_extra_networks:
+            with devices.autocast():
+                extra_networks.activate(p, extra_network_data)
 
         if p.scripts is not None:
             p.scripts.process_batch(p, batch_number=n, prompts=prompts, seeds=seeds, subseeds=subseeds)
+
+        # params.txt should be saved after scripts.process_batch, since the
+        # infotext could be modified by that callback
+        # Example: a wildcard processed by process_batch sets an extra model
+        # strength, which is saved as "Model Strength: 1.0" in the infotext
+        if n == 0:
+            with open(os.path.join(paths.data_path, "params.txt"), "w", encoding="utf8") as file:
+                processed = Processed(p, [], p.seed, "")
+                file.write(processed.infotext(p, 0))
 
         with devices.autocast():
             # 'prompt string' => tensor([T, D])
             uc = get_conds_with_caching(prompt_parser.get_learned_conditioning, negative_prompts, p.steps, cached_uc)
             c = get_conds_with_caching(prompt_parser.get_multicond_learned_conditioning, prompts, p.steps, cached_c)
-
-        devices.torch_gc()
 
         return c, uc, prompts, seeds, subseeds
 
@@ -271,7 +268,6 @@ def process_images_cond_to_image(p: StableDiffusionProcessing, c, uc, prompts, s
             comments[comment] = 1
     
     with torch.no_grad(), p.sd_model.ema_scope():
-        
         with devices.without_autocast() if devices.unet_needs_upcast else devices.autocast():
             samples_ddim = p.sample(conditioning=c, unconditional_conditioning=uc, seeds=seeds, subseeds=subseeds, subseed_strength=p.subseed_strength, prompts=prompts)
 
@@ -330,6 +326,22 @@ def process_images_cond_to_image(p: StableDiffusionProcessing, c, uc, prompts, s
                 image.info["parameters"] = text
             output_images.append(image)
 
+            if hasattr(p, 'mask_for_overlay') and p.mask_for_overlay:
+                image_mask = p.mask_for_overlay.convert('RGB')
+                image_mask_composite = Image.composite(image.convert('RGBA').convert('RGBa'), Image.new('RGBa', image.size), p.mask_for_overlay.convert('L')).convert('RGBA')
+
+                if opts.save_mask:
+                    images.save_image(image_mask, p.outpath_samples, "", seeds[i], prompts[i], opts.samples_format, info=infotext(n, i), p=p, suffix="-mask")
+
+                if opts.save_mask_composite:
+                    images.save_image(image_mask_composite, p.outpath_samples, "", seeds[i], prompts[i], opts.samples_format, info=infotext(n, i), p=p, suffix="-mask-composite")
+
+                if opts.return_mask:
+                    output_images.append(image_mask)
+                
+                if opts.return_mask_composite:
+                    output_images.append(image_mask_composite)
+
         del x_samples_ddim 
 
         devices.torch_gc()
@@ -337,10 +349,9 @@ def process_images_cond_to_image(p: StableDiffusionProcessing, c, uc, prompts, s
         state.nextjob()
 
     p.color_corrections = None
-    
     index_of_first_image = 0
 
-    if not p.disable_extra_networks:
+    if not p.disable_extra_networks and extra_network_data:
         extra_networks.deactivate(p, extra_network_data)
 
     devices.torch_gc()
@@ -349,7 +360,7 @@ def process_images_cond_to_image(p: StableDiffusionProcessing, c, uc, prompts, s
 
     if p.scripts is not None:
         p.scripts.postprocess(p, res)
-    
+
     return res
 
 # ↑↑↑ the above is modified from 'modules/processing.py' ↑↑↑
