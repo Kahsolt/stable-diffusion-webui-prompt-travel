@@ -8,6 +8,7 @@ from traceback import print_exc
 
 import gradio as gr
 import numpy as np
+import torch
 from torch import Tensor
 import torch.nn.functional as F
 try:
@@ -17,7 +18,7 @@ except ImportError:
     print('package moviepy not installed, will not be able to generate video')
 
 from modules.scripts import Script
-from modules.script_callbacks import on_before_image_saved, ImageSaveParams, on_cfg_denoiser, CFGDenoiserParams, remove_callbacks_for_function
+from modules.script_callbacks import on_before_image_saved, ImageSaveParams, on_cfg_denoiser, CFGDenoiserParams, on_cfg_denoised, CFGDenoisedParams, remove_callbacks_for_function
 from modules.ui import gr_show
 from modules.shared import state, opts, sd_upscalers
 from modules.prompt_parser import ScheduledPromptConditioning, MulticondLearnedConditioning
@@ -1017,8 +1018,13 @@ class Script(Script):
 
         return images, initial_info
 
+    ''' ↓↓↓ extension support ↓↓↓ '''
+
     def ext_depth_preprocess(self, p: StableDiffusionProcessing, depth_img: PILImage):  # copy from repo `AnonymousCervine/depth-image-io-for-SDWebui`
         from types import MethodType
+        from einops import repeat, rearrange
+        import modules.shared as shared
+        import modules.devices as devices
 
         def sanitize_pil_image_mode(img):
             invalid_modes = {'P', 'CMYK', 'HSV'}
