@@ -214,13 +214,13 @@ def process_images_prompt_to_cond(p: StableDiffusionProcessing) -> tuple:
         seeds = p.all_seeds[n * p.batch_size:(n + 1) * p.batch_size]
         subseeds = p.all_subseeds[n * p.batch_size:(n + 1) * p.batch_size]
 
+        if p.scripts is not None:
+            p.scripts.before_process_batch(p, batch_number=n, prompts=prompts, seeds=seeds, subseeds=subseeds)
+
         if len(prompts) == 0:
             return
 
         prompts, extra_network_data = extra_networks.parse_prompts(prompts)
-
-        if p.scripts is not None:
-            p.scripts.before_process_batch(p, batch_number=n, prompts=prompts, seeds=seeds, subseeds=subseeds)
 
         if not p.disable_extra_networks:
             with devices.autocast():
