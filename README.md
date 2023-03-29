@@ -47,6 +47,7 @@ Try interpolating on the hidden vectors of conditioning prompt to make seemingly
 
 ⚪ Fixups
 
+- 2023/03/29: `v2.4` bug fixes on script hook, now working correctly with extra networks & [sd-webui-controlnet](https://github.com/Mikubill/sd-webui-controlnet)
 - 2023/01/31: keep up with webui's updates, (issue #14: `ImportError: cannot import name 'single_sample_to_image'`)
 - 2023/01/28: keep up with webui's updates, extra-networks rework
 - 2023/01/16: `v1.5` apply zero padding when condition length mismatch (issue #10: `RuntimeError: The size of tensor a (77) must match the size of tensor b (154) at non-singleton dimension 0`), typo in demo filename

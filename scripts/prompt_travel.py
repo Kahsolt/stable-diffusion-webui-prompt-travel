@@ -113,11 +113,7 @@ if 'global consts':
 
 from modules.processing import *
 
-extra_network_data = None
-stored_opts = None
-
 def process_images_before(p: StableDiffusionProcessing):
-    global stored_opts
     stored_opts = {k: opts.data[k] for k in p.override_settings.keys()}
 
     try:
@@ -130,9 +126,9 @@ def process_images_before(p: StableDiffusionProcessing):
     except:
         pass
 
-def process_images_after(p: StableDiffusionProcessing):
-    global stored_opts
+    return stored_opts
 
+def process_images_after(p: StableDiffusionProcessing, stored_opts:Dict):
     # restore opts to original state
     if p.override_settings_restore_afterwards:
         for k, v in stored_opts.items():
@@ -143,10 +139,8 @@ def process_images_after(p: StableDiffusionProcessing):
                 sd_vae.reload_vae_weights()
 
 def process_images_prompt_to_cond(p: StableDiffusionProcessing) -> tuple:
-    """this is the main loop that both txt2img and img2img use; it calls func_init once inside all the scopes and func_sample once per batch"""
+    ''' call once per stage '''
     
-    global extra_network_data
-
     if type(p.prompt) == list:
         assert(len(p.prompt) > 0)
     else:
@@ -182,9 +176,6 @@ def process_images_prompt_to_cond(p: StableDiffusionProcessing) -> tuple:
 
     if os.path.exists(cmd_opts.embeddings_dir) and not p.do_not_reload_embeddings:
         model_hijack.embedding_db.load_textual_inversion_embeddings()
-
-    if p.scripts is not None:
-        p.scripts.process(p)
 
     cached_uc = [None, None]
     cached_c = [None, None]
@@ -252,10 +243,10 @@ def process_images_prompt_to_cond(p: StableDiffusionProcessing) -> tuple:
             uc = get_conds_with_caching(prompt_parser.get_learned_conditioning, negative_prompts, p.steps, cached_uc)
             c = get_conds_with_caching(prompt_parser.get_multicond_learned_conditioning, prompts, p.steps, cached_c)
 
-        return c, uc, prompts, seeds, subseeds
+        return c, uc, prompts, seeds, subseeds, extra_network_data
 
 def process_images_cond_to_image(p: StableDiffusionProcessing, c, uc, prompts, seeds, subseeds) -> Processed:
-    global extra_network_data
+    ''' call `travel steps` times per stage '''
 
     comments = {}
     infotexts = []
@@ -277,16 +268,13 @@ def process_images_cond_to_image(p: StableDiffusionProcessing, c, uc, prompts, s
         for x in x_samples_ddim: devices.test_for_nans(x, "vae")
         x_samples_ddim = torch.stack(x_samples_ddim).float()
         x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
-
         del samples_ddim
 
         if shared.cmd_opts.lowvram or shared.cmd_opts.medvram:
             lowvram.send_everything_to_cpu()
-        
         devices.torch_gc()
 
         n = 0       # batch count for legacy compatible
-
         if p.scripts is not None:
             p.scripts.postprocess_batch(p, x_samples_ddim, batch_number=n)
 
@@ -344,7 +332,6 @@ def process_images_cond_to_image(p: StableDiffusionProcessing, c, uc, prompts, s
                     output_images.append(image_mask_composite)
 
         del x_samples_ddim 
-
         devices.torch_gc()
 
         state.nextjob()
@@ -352,17 +339,9 @@ def process_images_cond_to_image(p: StableDiffusionProcessing, c, uc, prompts, s
     p.color_corrections = None
     index_of_first_image = 0
 
-    if not p.disable_extra_networks and extra_network_data:
-        extra_networks.deactivate(p, extra_network_data)
-
     devices.torch_gc()
 
-    res = Processed(p, output_images, p.all_seeds[0], infotext(), comments="".join(["\n\n" + x for x in comments]), subseed=p.all_subseeds[0], index_of_first_image=index_of_first_image, infotexts=infotexts)
-
-    if p.scripts is not None:
-        p.scripts.postprocess(p, res)
-
-    return res
+    return Processed(p, output_images, p.all_seeds[0], infotext(), comments="".join(["\n\n" + x for x in comments]), subseed=p.all_subseeds[0], index_of_first_image=index_of_first_image, infotexts=infotexts)
 
 # ↑↑↑ the above is modified from 'modules/processing.py' ↑↑↑
 
@@ -742,22 +721,27 @@ class Script(Script):
                 params.image = img
 
         def cfg_denoiser_hijack(params:CFGDenoiserParams):
-            if not 'show_debug':
-                print('sigma:', params.sigma[-1].item())
+            if not 'show_debug': print('sigma:', params.sigma[-1].item())
 
         # Dispatch
         runner = getattr(self, f'run_{mode.value}')
         if not runner: Processed(p, [], p.seed, f'no runner found for mode: {mode.value}')
 
+        stored_opts = {}
+        proc = Processed(p, [], p.seed, '')
         try:
             if ext_depth: self.ext_depth_preprocess(p, depth_img)
             if ext_upscale: on_before_image_saved(save_image_hijack)
             if False: on_cfg_denoiser(cfg_denoiser_hijack)
-            process_images_before(p)
 
+            stored_opts = process_images_before(p)
+            if p.scripts is not None: p.scripts.process(p)
             images, info = runner(p)
+            proc = Processed(p, images, p.seed, info)
         finally:
-            process_images_after(p)
+            if p.scripts is not None: p.scripts.postprocess(p, proc)
+            process_images_after(p, stored_opts)
+
             if False: remove_callbacks_for_function(cfg_denoiser_hijack)
             if ext_upscale: remove_callbacks_for_function(save_image_hijack)
             if ext_depth: self.ext_depth_postprocess(p, depth_img)
@@ -782,7 +766,7 @@ class Script(Script):
                 elif video_fmt == VideoFormat.GIF:  clip.write_gif      (fbase + '.gif',  loop=True)
             except: print_exc()
 
-        return Processed(p, images, p.seed, info)
+        return proc
 
     def run_linear(self, p: StableDiffusionProcessing) -> Tuple[List[PILImage], str]:
         lerp_fn     = weighted_sum if self.lerp_meth == LerpMethod.LERP else geometric_slerp
@@ -816,9 +800,9 @@ class Script(Script):
         p.prompt          = pos_prompts[0]
         p.negative_prompt = neg_prompts[0]
         p.subseed         = self.subseed
-        from_pos_hidden, from_neg_hidden, prompts, seeds, subseeds = process_images_prompt_to_cond(p)
+        from_pos_hidden, from_neg_hidden, prompts, seeds, subseeds, from_extra_network_data = process_images_prompt_to_cond(p)
         gen_image(from_pos_hidden, from_neg_hidden, prompts, seeds, subseeds)
-        
+
         # travel through stages
         i_frames = 1
         for i in range(1, n_stages):
@@ -836,7 +820,7 @@ class Script(Script):
             p.prompt           = pos_prompts[i]
             p.negative_prompt  = neg_prompts[i]
             p.subseed          = self.subseed
-            to_pos_hidden, to_neg_hidden, prompts, seeds, subseeds = process_images_prompt_to_cond(p)
+            to_pos_hidden, to_neg_hidden, prompts, seeds, subseeds, to_extra_network_data = process_images_prompt_to_cond(p)
 
             # Step 2: draw the interpolated images
             is_break_iter = False
@@ -856,7 +840,10 @@ class Script(Script):
             
             # move to next stage
             from_pos_hidden, from_neg_hidden = to_pos_hidden, to_neg_hidden
+            self.extra_networks_deactivate(p, from_extra_network_data)
+            from_extra_network_data = to_extra_network_data
 
+        self.extra_networks_deactivate(p, from_extra_network_data)
         return images, initial_info
 
     def run_linear_embryo(self, p: StableDiffusionProcessing) -> Tuple[List[PILImage], str]:
@@ -900,11 +887,11 @@ class Script(Script):
         # Step 1: get starting & ending condition
         p.prompt  = pos_prompts[0]
         p.subseed = self.subseed
-        from_pos_hidden, neg_hidden, prompts, seeds, subseeds = process_images_prompt_to_cond(p)
+        from_pos_hidden, neg_hidden, prompts, seeds, subseeds, from_extra_network_data = process_images_prompt_to_cond(p)
 
         p.prompt  = pos_prompts[1]
         p.subseed = self.subseed
-        to_pos_hidden, neg_hidden, prompts, seeds, subseeds = process_images_prompt_to_cond(p)
+        to_pos_hidden, neg_hidden, prompts, seeds, subseeds, to_extra_network_data = process_images_prompt_to_cond(p)
 
         # Step 2: get the condition middle-point as embryo then hatch it halfway
         with denoiser_hijack(get_embryo_fn):
@@ -925,7 +912,9 @@ class Script(Script):
                 inter_pos_hidden = lerp_fn(from_pos_hidden, to_pos_hidden, alpha)
                 imgs = gen_image(inter_pos_hidden, neg_hidden, prompts, seeds, subseeds)
                 images.extend(imgs)
-        
+
+        self.extra_networks_deactivate(from_extra_network_data)
+        self.extra_networks_deactivate(to_extra_network_data)
         return images, initial_info
 
     def run_replace(self, p: StableDiffusionProcessing) -> Tuple[List[PILImage], str]:
@@ -960,7 +949,7 @@ class Script(Script):
             print(f'  pos prompts: {pos_prompts[0]}')
         p.prompt          = pos_prompts[0]
         p.subseed         = self.subseed
-        from_pos_hidden, neg_hidden, prompts, seeds, subseeds = process_images_prompt_to_cond(p)
+        from_pos_hidden, neg_hidden, prompts, seeds, subseeds, from_extra_network_data = process_images_prompt_to_cond(p)
         gen_image(from_pos_hidden, neg_hidden, prompts, seeds, subseeds)
         
         # travel through stages
@@ -978,7 +967,7 @@ class Script(Script):
                 print(f'  pos prompts: {pos_prompts[i]}')
             p.prompt           = pos_prompts[i]
             p.subseed          = self.subseed
-            to_pos_hidden, neg_hidden, prompts, seeds, subseeds = process_images_prompt_to_cond(p)
+            to_pos_hidden, neg_hidden, prompts, seeds, subseeds, to_extra_network_data = process_images_prompt_to_cond(p)
 
             # ========== ↓↓↓ major differences from run_linear() ↓↓↓ ==========
             
@@ -1015,8 +1004,17 @@ class Script(Script):
             
             # move to next stage
             from_pos_hidden = to_pos_hidden
+            self.extra_networks_deactivate(from_extra_network_data)
+            from_extra_network_data = to_extra_network_data
 
+        self.extra_networks_deactivate(from_extra_network_data)
         return images, initial_info
+
+    ''' ↓↓↓ helpers ↓↓↓ '''
+
+    def extra_networks_deactivate(self, p:StableDiffusionProcessing, extra_network_data):
+        if not p.disable_extra_networks and extra_network_data:
+            extra_networks.deactivate(p, extra_network_data)
 
     ''' ↓↓↓ extension support ↓↓↓ '''
 
