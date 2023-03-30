@@ -389,12 +389,18 @@ def wrap_get_align_replace(fn:Callable[..., Tensor]):
     return wrapper
 
 @wrap_get_align_replace
+def weighted_sum_cond(condA:Tensor, condB:Tensor, alpha:float) -> Tensor:
+    return weighted_sum(condA, condB, alpha)
+
 def weighted_sum(condA:Tensor, condB:Tensor, alpha:float) -> Tensor:
     ''' linear interpolate on latent space of condition '''
 
     return (1 - alpha) * condA + (alpha) * condB
 
 @wrap_get_align_replace
+def geometric_slerp_cond(condA:Tensor, condB:Tensor, alpha:float) -> Tensor:
+    return geometric_slerp(condA, condB, alpha)
+
 def geometric_slerp(condA:Tensor, condB:Tensor, alpha:float) -> Tensor:
     ''' spherical linear interpolation on latent space of condition, ref: https://en.wikipedia.org/wiki/Slerp '''
 
@@ -415,7 +421,7 @@ def geometric_slerp(condA:Tensor, condB:Tensor, alpha:float) -> Tensor:
         return torch.where(mask, lerp, slerp)           # use simple lerp when angle very close to avoid NaN
 
 @wrap_get_align_replace
-def replace_until_match(condA:Tensor, condB:Tensor, count:int, dist:Tensor, order:str=ModeReplaceOrder.RANDOM) -> Tensor:
+def replace_until_match_cond(condA:Tensor, condB:Tensor, count:int, dist:Tensor, order:str=ModeReplaceOrder.RANDOM) -> Tensor:
     ''' value substite on condition tensor; will inplace modify `dist` '''
 
     def index_tensor_to_tuple(index:Tensor) -> Tuple[Tensor, ...]:
@@ -773,7 +779,7 @@ class Script(scripts.Script):
         return proc
 
     def run_linear(self, p: StableDiffusionProcessing) -> Tuple[List[PILImage], str]:
-        lerp_fn     = weighted_sum if self.lerp_meth == LerpMethod.LERP else geometric_slerp
+        lerp_fn     = weighted_sum_cond if self.lerp_meth == LerpMethod.LERP else geometric_slerp_cond
         genesis     = self.genesis
         denoise_w   = self.denoise_w
         pos_prompts = self.pos_prompts
@@ -853,7 +859,7 @@ class Script(scripts.Script):
     def run_linear_embryo(self, p: StableDiffusionProcessing) -> Tuple[List[PILImage], str]:
         ''' NOTE: this procedure has special logic, we separate it from run_linear() so far '''
 
-        lerp_fn     = weighted_sum if self.lerp_meth == LerpMethod.LERP else geometric_slerp
+        lerp_fn     = weighted_sum_cond if self.lerp_meth == LerpMethod.LERP else geometric_slerp_cond
         embryo_step = self.embryo_step
         pos_prompts = self.pos_prompts
         n_frames    = self.steps[1] + 2
@@ -899,7 +905,7 @@ class Script(scripts.Script):
 
         # Step 2: get the condition middle-point as embryo then hatch it halfway
         with denoiser_hijack(get_embryo_fn):
-            mid_pos_hidden = weighted_sum(from_pos_hidden, to_pos_hidden, 0.5)
+            mid_pos_hidden = weighted_sum_cond(from_pos_hidden, to_pos_hidden, 0.5)
             gen_image(mid_pos_hidden, neg_hidden, prompts, seeds, subseeds, save=False)
 
         try:
@@ -996,7 +1002,7 @@ class Script(scripts.Script):
             for _ in range(1, n_inter):
                 if state.interrupted: is_break_iter = True ; break
 
-                inter_pos_hidden = replace_until_match(inter_pos_hidden, to_pos_hidden, replace_count, dist=dist, order=replace_order)
+                inter_pos_hidden = replace_until_match_cond(inter_pos_hidden, to_pos_hidden, replace_count, dist=dist, order=replace_order)
                 gen_image(inter_pos_hidden, neg_hidden, prompts, seeds, subseeds)
             
             # ========== ↑↑↑ major differences from run_linear() ↑↑↑ ==========

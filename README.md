@@ -27,13 +27,9 @@ Try interpolating on the hidden vectors of conditioning prompt to make seemingly
 
 ### Change Log
 
-⚪ Compatibility Warning
-
-- 2023/01/12: webui's recent commit [#50e25362794d46cd9a55c70e953a8b4126fd42f7](https://github.com/AUTOMATIC1111/stable-diffusion-webui/commit/50e25362794d46cd9a55c70e953a8b4126fd42f7) refactors CLIP-related code and make wrapper even more deeper, harder to hack in, causing the replace mode also henceforth dead. I finally decide to **remove the experimental 'replace' & 'grad'** functionality :( 
-- 2023/01/04: webui's recent commit [#bd68e35de3b7cf7547ed97d8bdf60147402133cc](https://github.com/AUTOMATIC1111/stable-diffusion-webui/commit/bd68e35de3b7cf7547ed97d8bdf60147402133cc) saves memory use in forward calculation, but totally ruins backward gradient calculation via `torch.autograd.grad()` which this script heavily relies on. This change is so far not pluggable but forcely applied, so we're regrettable to say, prompt-travel's grad mode and part of the replace mode will be broken henceforth. (issue #7 cannot be fixed)
-
 ⚪ Features
 
+- 2023/03/30: `v2.5` add controlnet-travel script (experimental), interpolating between hint conditions **instead of prompts**, thx for the code base from [sd-webui-controlnet](https://github.com/Mikubill/sd-webui-controlnet) 
 - 2023/02/14: `v2.3` integrate basic function of [depth-image-io](https://github.com/AnonymousCervine/depth-image-io-for-SDWebui) for depth2img models
 - 2023/01/27: `v2.2` add 'slerp' linear interpolation method
 - 2023/01/22: `v2.1` add experimental 'replace' mode again, it's not smooth interpolation
@@ -95,6 +91,12 @@ other stuff:
 | reference image for img2img | embryo image decoded <br/> case `i2i-e-euler_a` with `embryo_step=8` |
 | :-: | :-: |
 | ![i2i-ref](img/i2i-ref.png) | ![embryo](img/embryo.png) |
+
+⚪ ControlNet support
+
+| prompt-travel with ControlNet (depth) | controlnet-travel (depth) |
+| :-: | :-: |
+| ![ctrlnet-ref](img/ctrlnet-ref.gif) | ![ctrlnet-depth](img/ctrlnet-depth.gif) |
 
 
 Example above run configure:
@@ -207,6 +209,7 @@ There are still two steps away from a really smooth and high resolution animatio
 
 ⚪ extensions that inspired this repo
 
+- controlnet (various image conditions): [https://github.com/Mikubill/sd-webui-controlnet](https://github.com/Mikubill/sd-webui-controlnet)
 - depth-image-io (custom depth2img): [https://github.com/AnonymousCervine/depth-image-io-for-SDWebui](https://github.com/AnonymousCervine/depth-image-io-for-SDWebui)
 - animator (img2img): [https://github.com/Animator-Anon/animator_extension](https://github.com/Animator-Anon/animator_extension)
 - sd-webui-riffusion (music gen): [https://github.com/enlyth/sd-webui-riffusion](https://github.com/enlyth/sd-webui-riffusion)
