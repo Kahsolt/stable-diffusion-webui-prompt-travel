@@ -17,7 +17,7 @@ try:
 except ImportError:
     print('package moviepy not installed, will not be able to generate video')
 
-from modules.scripts import Script
+import modules.scripts as scripts
 from modules.script_callbacks import on_before_image_saved, ImageSaveParams, on_cfg_denoiser, CFGDenoiserParams, on_cfg_denoised, CFGDenoisedParams, remove_callbacks_for_function
 from modules.ui import gr_show
 from modules.shared import state, opts, sd_upscalers
@@ -533,22 +533,52 @@ def parse_slice(picker:str) -> Optional[slice]:
     
     return slice(start, stop, step)
 
-def parse_resolution(p:StableDiffusionProcessing, upscale_meth:str, upscale_ratio:float, upscale_width:int, upscale_height:int) -> Tuple[bool, Tuple[int, int]]:
-    if upscale_meth == 'None':
-        return False, (p.width, p.height)
-
+def parse_resolution(width:int, height:int, upscale_ratio:float, upscale_width:int, upscale_height:int) -> Tuple[bool, Tuple[int, int]]:
     if upscale_width == upscale_height == 0:
         if upscale_ratio == 1.0:
-            return False, (p.width, p.height)
+            return False, (width, height)
         else:
-            return True, (round(p.width * upscale_ratio), round(p.height * upscale_ratio))
+            return True, (round(width * upscale_ratio), round(height * upscale_ratio))
     else:
-        if upscale_width  == 0: upscale_width  = round(p.width  * upscale_height / p.height)
-        if upscale_height == 0: upscale_height = round(p.height * upscale_width  / p.width)
-        return (p.width != upscale_width and p.height != upscale_height), (upscale_width, upscale_height)
+        if upscale_width  == 0: upscale_width  = round(width  * upscale_height / height)
+        if upscale_height == 0: upscale_height = round(height * upscale_width  / width)
+        return (width != upscale_width and height != upscale_height), (upscale_width, upscale_height)
 
 
-class Script(Script):
+def upscale_image(img:PILImage, width:int, height:int, upscale_meth:str, upscale_ratio:float, upscale_width:int, upscale_height:int) -> PILImage:
+    if upscale_meth == 'None': return img
+    need_upscale, (tgt_w, tgt_h) = parse_resolution(width, height, upscale_ratio, upscale_width, upscale_height)
+    if need_upscale:
+        if 'show_debug': print(f'>> upscale: ({width}, {height}) => ({tgt_w}, {tgt_h})')
+
+        if max(tgt_w / width, tgt_h / height) > 4:      # must split into two rounds for NN model capatibility
+            hf_w, hf_h = round(width * 4), round(height * 4)
+            img = resize_image(0, img, hf_w, hf_h, upscaler_name=upscale_meth)
+        img = resize_image(0, img, tgt_w, tgt_h, upscaler_name=upscale_meth)
+    return img
+
+def save_video(images:List[PILImage], video_slice:slice, video_pad:int, video_fps:float, video_fmt:VideoFormat, fbase:str):
+    if len(images) <= 1 or 'ImageSequenceClip' not in globals(): return
+
+    try:
+        # arrange frames
+        if video_slice:   images = images[video_slice]
+        if video_pad > 0: images = [images[0]] * video_pad + images + [images[-1]] * video_pad
+
+        # export video
+        seq: List[np.ndarray] = [np.asarray(img) for img in images]
+        try:
+            clip = ImageSequenceClip(seq, fps=video_fps)
+        except:     # images may have different size (small probability due to upscaler)
+            clip = concatenate_videoclips([ImageClip(img, duration=1/video_fps) for img in seq], method='compose')
+            clip.fps = video_fps
+        if   video_fmt == VideoFormat.MP4:  clip.write_videofile(fbase + '.mp4',  verbose=False, audio=False)
+        elif video_fmt == VideoFormat.WEBM: clip.write_videofile(fbase + '.webm', verbose=False, audio=False)
+        elif video_fmt == VideoFormat.GIF:  clip.write_gif      (fbase + '.gif',  loop=True)
+    except: print_exc()
+
+
+class Script(scripts.Script):
 
     def title(self):
         return 'Prompt Travel'
@@ -709,16 +739,7 @@ class Script(Script):
         self.n_frames      = n_frames
 
         def save_image_hijack(params:ImageSaveParams):
-            need_upscale, (tgt_w, tgt_h) = parse_resolution(p, upscale_meth, upscale_ratio, upscale_width, upscale_height)
-            if need_upscale:
-                if 'show_debug': print(f'>> upscale: ({p.width}, {p.height}) => ({tgt_w}, {tgt_h})')
-
-                img: PILImage = params.image
-                if max(tgt_w / p.width, tgt_h / p.height) > 4:      # must split into two rounds for NN model capatibility
-                    hf_w, hf_h = round(p.width * 4), round(p.height * 4)
-                    img = resize_image(0, img, hf_w, hf_h, upscaler_name=upscale_meth)
-                img = resize_image(0, img, tgt_w, tgt_h, upscaler_name=upscale_meth)
-                params.image = img
+            params.image = upscale_image(params.image, p.width, p.height, upscale_meth, upscale_ratio, upscale_width, upscale_height)
 
         def cfg_denoiser_hijack(params:CFGDenoiserParams):
             if not 'show_debug': print('sigma:', params.sigma[-1].item())
@@ -747,24 +768,7 @@ class Script(Script):
             if ext_depth: self.ext_depth_postprocess(p, depth_img)
 
         # Save video
-        if ext_video and len(images) > 1 and 'ImageSequenceClip' in globals():
-            try:
-                # arrange frames
-                if video_slice:   images = images[video_slice]
-                if video_pad > 0: images = [images[0]] * video_pad + images + [images[-1]] * video_pad
-
-                # export video
-                seq: List[np.ndarray] = [np.asarray(img) for img in images]
-                try:
-                    clip = ImageSequenceClip(seq, fps=video_fps)
-                except:     # images may have different size (small probability due to upscaler)
-                    clip = concatenate_videoclips([ImageClip(img, duration=1/video_fps) for img in seq], method='compose')
-                    clip.fps = video_fps
-                fbase = os.path.join(self.log_dp, f'travel-{travel_number:05}')
-                if   video_fmt == VideoFormat.MP4:  clip.write_videofile(fbase + '.mp4',  verbose=False, audio=False)
-                elif video_fmt == VideoFormat.WEBM: clip.write_videofile(fbase + '.webm', verbose=False, audio=False)
-                elif video_fmt == VideoFormat.GIF:  clip.write_gif      (fbase + '.gif',  loop=True)
-            except: print_exc()
+        if ext_video: save_video(images, video_slice, video_pad, video_fps, video_fmt, os.path.join(self.log_dp, f'travel-{travel_number:05}'))
 
         return proc
 
