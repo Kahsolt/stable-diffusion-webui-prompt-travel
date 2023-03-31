@@ -29,6 +29,7 @@ Try interpolating on the hidden vectors of conditioning prompt to make seemingly
 
 ⚪ Features
 
+- 2023/03/31: `v2.6` add a tkinter [GUI](#run-each-time) for postprocess toolchain
 - 2023/03/30: `v2.5` add controlnet-travel script (experimental), interpolating between hint conditions **instead of prompts**, thx for the code base from [sd-webui-controlnet](https://github.com/Mikubill/sd-webui-controlnet) 
 - 2023/02/14: `v2.3` integrate basic function of [depth-image-io](https://github.com/AnonymousCervine/depth-image-io-for-SDWebui) for depth2img models
 - 2023/01/27: `v2.2` add 'slerp' linear interpolation method
@@ -196,6 +197,15 @@ There are still two steps away from a really smooth and high resolution animatio
 - download [FFmpeg](https://ffmpeg.org/download.html) binary (e.g.: `ffmpeg-release-full-shared.7z` or `ffmpeg-git-full.7z`)
 
 #### run each time
+
+⚪ tkinter GUI
+
+![postprocessor](img/postprocessor-gui.png)
+
+- run `postprocessor.py`
+- find usage help message in right click pop menu
+
+⚪ cmd script
 
 - check params in [postprocess.cmd](postprocess.cmd)
 - pick one way to start 😃
