@@ -4,7 +4,7 @@ __pycache__/
 
 # third party tools
 tools/*
-!tools/README.md
+!tools/README.txt
 !tools/*.cmd
 
 # user-wise config files
