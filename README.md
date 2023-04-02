@@ -179,7 +179,7 @@ There are still two steps away from a really smooth and high resolution animatio
 
 #### setup once
 
-⚪ auto install
+⚪ auto install (for Windows)
 
 - run `cd tools & install.cmd`
 - trouble shooting
@@ -187,35 +187,45 @@ There are still two steps away from a really smooth and high resolution animatio
   - if you got SSL errors about `curl schannel ... Unknown error ... certificate.`, the downloader not work due to some SSL security reasons, just turn to install manually...
 - you will have four components: [Busybox](https://frippery.org/busybox/), [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan), [RIFE](https://github.com/nihui/rife-ncnn-vulkan) and [FFmpeg](https://ffmpeg.org/) installed under the [tools](tools) folder
 
-⚪ manually install
+⚪ manually install (for Windows/Linux/Mac)
 
-- understand the `tools` folder layout => [tools/README.txt](tools/README.txt)
-  - if you indeed wanna put the tools elsewhere, modify paths in [tools/link.cmd](tools/link.cmd) and run `cd tools & link.cmd` 😉
+ℹ Understand the `tools` folder layout first => [tools/README.txt](tools/README.txt)  
+ℹ If you indeed wanna put the tools elsewhere, modify paths in [tools/link.cmd](tools/link.cmd) and run `cd tools & link.cmd` 😉
+
+For **Windows**: 
+
 - download [Busybox](https://frippery.org/busybox/)
 - download [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN/releases) (e.g.: `realesrgan-ncnn-vulkan-20220424-windows.zip`)
   - (optional) download interesting seperated model checkpoints (e.g.: `realesr-animevideov3.pth`)
 - download [rife-ncnn-vulkan](https://github.com/nihui/rife-ncnn-vulkan/releases) bundle (e.g.: `rife-ncnn-vulkan-20221029-windows.zip `)
 - download [FFmpeg](https://ffmpeg.org/download.html) binary (e.g.: `ffmpeg-release-full-shared.7z` or `ffmpeg-git-full.7z`)
 
+For **Linux/Mac**: 
+
+- download [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN/releases) and [rife-ncnn-vulkan](https://github.com/nihui/rife-ncnn-vulkan/releases), put them according to the `tools` folder layout, manually apply `chmod 755` to the executables
+- `ffmpeg` can be easily found in your app store or package manager, run like `apt install ffmpeg`; DO NOT need to link it under `tools` folder
+
+
 #### run each time
 
-⚪ tkinter GUI
+⚪ tkinter GUI (for Windows/Linux/Mac)
 
 ![postprocessor](img/postprocessor-gui.png)
 
-- run `cmd_here.cmd` to start webui's python venv
-- run `pip install -r requirements.txt` (only once)
+- start webui's python venv
+  - for Windows: run `cmd_here.cmd`
+  - for Linux/Mac: run `..\..\venv\Scripts\activate`
+- run `pip install -r requirements.txt` (only setup once)
 - run `postprocessor.py`
 - find usage help message in right click pop menu
 
-⚪ cmd script
+⚪ <del> cmd script (for Windows) </del>
 
 - check params in [postprocess-config.cmd](postprocess-config.cmd)
 - pick one way to start 😃
   - run `postprocess.cmd path/to/<image_folder>` from command line
   - drag & drop any image folder over `postprocess.cmd` icon
-
-ℹ Once processing finished, the explorer will be auto lauched to locate the generated file named with `synth.mp4`
+- once processing finished, the explorer will be auto lauched to locate the generated file named with `synth.mp4`
 
 
 ### Related Projects

@@ -2,16 +2,18 @@
 # Author: Armit
 # Create Time: 2023/03/31 
 
+import sys
 import os
 import shutil
 import psutil
 from pathlib import Path
 from time import time
 from PIL import Image
-from PIL.Image import Image as PILImage
 from PIL.ImageTk import PhotoImage
+import subprocess
 from subprocess import Popen
 from threading import Thread
+from typing import Union
 import gc
 
 import tkinter as tk
@@ -47,6 +49,18 @@ EXPORT_FMT = [
   'webm',
 ]
 
+def sanitize_pathname(path: Union[str, Path]) -> str:
+  if isinstance(path, Path): path = str(path)
+  return path.replace('\\', os.path.sep)
+
+def startfile(path:Union[str, Path]):
+  if isinstance(path, Path): path = str(path)
+  if sys.platform == 'win32':
+    os.startfile(path)
+  else:
+    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    subprocess.call([opener, path])
+
 def run_cmd(cmd:str) -> bool:
   try:
     print(f'[exec] {cmd}')
@@ -60,23 +74,23 @@ def run_resr(model:str, ratio:int, in_dp:Path, out_dp:Path) -> bool:
   out_dp.mkdir(exist_ok=True)
 
   if model == 'realesr-animevideov3': model = f'realesr-animevideov3-x{ratio}'
-  return run_cmd(f'realesrgan-ncnn-vulkan -v -s {ratio} -n {model} -i "{in_dp}" -o "{out_dp}"')
+  return run_cmd(f'realesrgan-ncnn-vulkan -v -s {ratio} -n {model} -i "{sanitize_pathname(in_dp)}" -o "{sanitize_pathname(out_dp)}"')
 
 def run_rife(model:str, interp:int, in_dp:Path, out_dp:Path) -> bool:
   if out_dp.exists(): shutil.rmtree(str(out_dp))
   out_dp.mkdir(exist_ok=True)
 
   if interp > 0: interp *= len(list(in_dp.iterdir()))
-  return run_cmd(f'rife-ncnn-vulkan -v -n {interp} -m {model} -i "{in_dp}" -o "{out_dp}"')
+  return run_cmd(f'rife-ncnn-vulkan -v -n {interp} -m {model} -i "{sanitize_pathname(in_dp)}" -o "{sanitize_pathname(out_dp)}"')
 
 def run_ffmpeg(fps:float, fmt:str, in_dp:Path, out_dp:Path) -> bool:
   out_fp = out_dp / f'synth.{fmt}'
   if out_fp.exists(): out_fp.unlink()
 
   if fmt == 'gif':
-    return run_cmd(f'ffmpeg -y -framerate {fps} -i "{in_dp}\%08d.png" {out_fp}')
+    return run_cmd(f'ffmpeg -y -framerate {fps} -i "{sanitize_pathname(in_dp / r"%08d.png")}" "{sanitize_pathname(out_fp)}"')
   else:
-    return run_cmd(f'ffmpeg -y -framerate {fps} -i "{in_dp}\%08d.png" -crf 20 -c:v libx264 -pix_fmt yuv420p {out_fp}')
+    return run_cmd(f'ffmpeg -y -framerate {fps} -i "{sanitize_pathname(in_dp / r"%08d.png")}" -crf 20 -c:v libx264 -pix_fmt yuv420p "{sanitize_pathname(out_fp)}"')
 
 
 WINDOW_TITLE  = 'Postprocessor Pipeline GUI'
@@ -284,7 +298,7 @@ class App:
 
     self.var_root_dp.set(root_dp)
 
-    dps = [dp for dp in root_dp.iterdir() if dp.is_dir()]
+    dps = sorted([dp for dp in Path(root_dp).iterdir() if dp.is_dir()])
     if len(dps) == 0: tkmsg.showerror('Error', 'No travels found!\Your root folder should be like <root_folder>/<travel_number>/*.png')
 
     self.ls.selection_clear(0, tk.END)
@@ -304,7 +318,7 @@ class App:
     self.cur_name = name
     if name not in self.cache:
       dp = Path(self.var_root_dp.get()) / name
-      self.cache[name] = [fp for fp in dp.iterdir() if fp.suffix.lower() in ['.png', '.jpg', '.jpeg']]
+      self.cache[name] = sorted([fp for fp in dp.iterdir() if fp.suffix.lower() in ['.png', '.jpg', '.jpeg']])
 
     n_imgs = len(self.cache[name])
     self.sc.config(to=n_imgs-1)
@@ -315,7 +329,7 @@ class App:
     self._pv_change()
 
   def _ls_open_dir(self):
-    try: os.startfile(Path(self.var_root_dp.get()) / self.cur_name)
+    try: startfile(Path(self.var_root_dp.get()) / self.cur_name)
     except: pass
 
   def _pv_change(self, evt=None):
@@ -379,7 +393,7 @@ class App:
       
         print(f'[Task] done ({time() - t:3f}s)')
         r = tkmsg.askyesno('Ok', 'Task done! Open output folder?')
-        if r: os.startfile(base_dp)
+        if r: startfile(base_dp)
       except:
         e = format_exc()
         print(e)
