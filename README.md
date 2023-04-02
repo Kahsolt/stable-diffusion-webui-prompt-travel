@@ -158,8 +158,6 @@ Hypernet: (this is my secret :)
   - fmt: (categorical), export video file format
   - pad: (int), repeat beginning/ending frames, giving a in/out time
   - pick: (string), cherry pick frames by [python slice syntax](https://www.pythoncentral.io/how-to-slice-listsarrays-and-tuples-in-python) before padding (e.g.: set `::2` to get only even frames, set `:-1` to drop last frame)
-- debug: (bool)
-  - whether show verbose debug info at console
 
 
 ### Installation
@@ -184,13 +182,16 @@ There are still two steps away from a really smooth and high resolution animatio
 ⚪ auto install
 
 - run `cd tools & install.cmd`
-- if you got any errors like `Access denied.`, try run it again until you see `Done!` without errors 😂
-- you will have three components: [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan), [RIFE](https://github.com/nihui/rife-ncnn-vulkan) and [FFmpeg](https://ffmpeg.org/) installed under the [tools](tools) folder
+- trouble shooting
+  - if you got any file system access errors like `Access denied.`, try run it again until you see `Done!` without errors 😂
+  - if you got SSL errors about `curl schannel ... Unknown error ... certificate.`, the downloader not work due to some SSL security reasons, just turn to install manually...
+- you will have four components: [Busybox](https://frippery.org/busybox/), [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan), [RIFE](https://github.com/nihui/rife-ncnn-vulkan) and [FFmpeg](https://ffmpeg.org/) installed under the [tools](tools) folder
 
 ⚪ manually install
 
 - understand the `tools` folder layout => [tools/README.txt](tools/README.txt)
   - if you indeed wanna put the tools elsewhere, modify paths in [tools/link.cmd](tools/link.cmd) and run `cd tools & link.cmd` 😉
+- download [Busybox](https://frippery.org/busybox/)
 - download [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN/releases) (e.g.: `realesrgan-ncnn-vulkan-20220424-windows.zip`)
   - (optional) download interesting seperated model checkpoints (e.g.: `realesr-animevideov3.pth`)
 - download [rife-ncnn-vulkan](https://github.com/nihui/rife-ncnn-vulkan/releases) bundle (e.g.: `rife-ncnn-vulkan-20221029-windows.zip `)
@@ -202,12 +203,14 @@ There are still two steps away from a really smooth and high resolution animatio
 
 ![postprocessor](img/postprocessor-gui.png)
 
+- run `cmd_here.cmd` to start webui's python venv
+- run `pip install -r requirements.txt` (only once)
 - run `postprocessor.py`
 - find usage help message in right click pop menu
 
 ⚪ cmd script
 
-- check params in [postprocess.cmd](postprocess.cmd)
+- check params in [postprocess-config.cmd](postprocess-config.cmd)
 - pick one way to start 😃
   - run `postprocess.cmd path/to/<image_folder>` from command line
   - drag & drop any image folder over `postprocess.cmd` icon

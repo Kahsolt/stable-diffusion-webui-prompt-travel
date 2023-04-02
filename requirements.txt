@@ -1,0 +1,6 @@
+# webui script
+moviepy
+
+# postprocessor (GUI)
+psutil
+Pillow
