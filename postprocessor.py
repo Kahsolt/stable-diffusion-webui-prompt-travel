@@ -54,6 +54,7 @@ def sanitize_pathname(path: Union[str, Path]) -> str:
   return path.replace('\\', os.path.sep)
 
 def startfile(path:Union[str, Path]):
+  # ref: https://stackoverflow.com/questions/17317219/is-there-an-platform-independent-equivalent-of-os-startfile/17317468#17317468
   if isinstance(path, Path): path = str(path)
   if sys.platform == 'win32':
     os.startfile(path)
@@ -318,7 +319,7 @@ class App:
     self.cur_name = name
     if name not in self.cache:
       dp = Path(self.var_root_dp.get()) / name
-      self.cache[name] = sorted([fp for fp in dp.iterdir() if fp.suffix.lower() in ['.png', '.jpg', '.jpeg']])
+      self.cache[name] = sorted([fp for fp in dp.iterdir() if fp.suffix.lower() in ['.png', '.jpg', '.jpeg'] and fp.stem != 'embryo'])
 
     n_imgs = len(self.cache[name])
     self.sc.config(to=n_imgs-1)
@@ -330,7 +331,7 @@ class App:
 
   def _ls_open_dir(self):
     try: startfile(Path(self.var_root_dp.get()) / self.cur_name)
-    except: pass
+    except: print_exc()
 
   def _pv_change(self, evt=None):
     if not self.cur_name: return
@@ -384,10 +385,17 @@ class App:
       try:
         self.is_running = True
         self.btn.config(state=tk.DISABLED, text='Running...')
+        
         if var_resr:
           assert run_resr(var_resr_m, var_resr_r, base_dp, base_dp / 'resr')
+
+          # NOTE: fix case of Embryo mode
+          embryo_fp: Path = base_dp / 'resr' / 'embryo.png'
+          if embryo_fp.exists(): embryo_fp.unlink()
+        
         if var_rife:
           assert run_rife(var_rife_m, var_rife_r, base_dp / 'resr', base_dp / 'rife')
+        
         if var_ffmpeg:
           assert run_ffmpeg(var_ffmpeg_r, var_ffmpeg_f, base_dp / 'rife', base_dp)
       

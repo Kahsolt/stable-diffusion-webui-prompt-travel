@@ -15,6 +15,8 @@ SET PY_BIN=python.exe
 %PY_BIN% --version > NUL
 IF ERRORLEVEL 1 GOTO die
 
+DOSKEY pp=python postprocessor.py
+
 CMD /K activate.bat ^& ECHO VENV_PATH: %VENV_PATH% ^& %PY_BIN% --version
 
 GOTO EOF

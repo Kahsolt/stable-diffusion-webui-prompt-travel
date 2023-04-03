@@ -214,10 +214,10 @@ For **Linux/Mac**:
 
 - start webui's python venv
   - for Windows: run `cmd_here.cmd`
-  - for Linux/Mac: run `..\..\venv\Scripts\activate`
+  - for Linux/Mac: run `../../venv/Scripts/activate`
 - run `pip install -r requirements.txt` (only setup once)
-- run `postprocessor.py`
-- find usage help message in right click pop menu
+- run `python postprocessor.py`, or for Windows just run the [DOSKEY](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/doskey) `pp`
+- find usage help message in right click pop menu to start
 
 ⚪ <del> cmd script (for Windows) </del>
 
