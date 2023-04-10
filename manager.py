@@ -22,6 +22,8 @@ import tkinter.messagebox as tkmsg
 import tkinter.filedialog as tkfdlg
 from traceback import print_exc, format_exc
 
+__version__ = '0.1'
+
 BASE_PATH = Path(__file__).absolute().parent
 WEBUI_PATH = BASE_PATH.parent.parent
 OUTPUT_PATH = WEBUI_PATH / 'outputs'
@@ -41,9 +43,19 @@ RESR_MODELS = {
   'realesrgan-x4plus': [4],
 }
 RIFE_MODELS = [
+  'rife',
+  'rife-anime',
+  'rife-HD',
+  'rife-UHD',
+  'rife-v2',
+  'rife-v2.3',
+  'rife-v2.4',
+  'rife-v3.0',
+  'rife-v3.1',
   'rife-v4',
+  'rife-v4.6',
 ]
-EXPORT_FMT = [
+EXPORT_FMT  = [
   'mp4',
   'gif',
   'webm',
@@ -75,14 +87,24 @@ def run_resr(model:str, ratio:int, in_dp:Path, out_dp:Path) -> bool:
   out_dp.mkdir(exist_ok=True)
 
   if model == 'realesr-animevideov3': model = f'realesr-animevideov3-x{ratio}'
-  return run_cmd(f'realesrgan-ncnn-vulkan -v -s {ratio} -n {model} -i "{sanitize_pathname(in_dp)}" -o "{sanitize_pathname(out_dp)}"')
+  safe_out_dp = sanitize_pathname(out_dp)
+  ok = run_cmd(f'realesrgan-ncnn-vulkan -v -s {ratio} -n {model} -i "{sanitize_pathname(in_dp)}" -o "{safe_out_dp}"')
+
+  # NOTE: fix case of Embryo mode
+  embryo_fp: Path = out_dp / 'embryo.png'
+  if embryo_fp.exists(): embryo_fp.unlink()
+
+  return ok
 
 def run_rife(model:str, interp:int, in_dp:Path, out_dp:Path) -> bool:
   if out_dp.exists(): shutil.rmtree(str(out_dp))
   out_dp.mkdir(exist_ok=True)
 
-  if interp > 0: interp *= len(list(in_dp.iterdir()))
-  return run_cmd(f'rife-ncnn-vulkan -v -n {interp} -m {model} -i "{sanitize_pathname(in_dp)}" -o "{sanitize_pathname(out_dp)}"')
+  if model == 'rife-v4':
+    if interp > 0: interp *= len(list(in_dp.iterdir()))
+    return run_cmd(f'rife-ncnn-vulkan -v -n {interp} -m {model} -i "{sanitize_pathname(in_dp)}" -o "{sanitize_pathname(out_dp)}"')
+  else:
+    return run_cmd(f'rife-ncnn-vulkan -v -m {model} -i "{sanitize_pathname(in_dp)}" -o "{sanitize_pathname(out_dp)}"')
 
 def run_ffmpeg(fps:float, fmt:str, in_dp:Path, out_dp:Path) -> bool:
   out_fp = out_dp / f'synth.{fmt}'
@@ -90,11 +112,16 @@ def run_ffmpeg(fps:float, fmt:str, in_dp:Path, out_dp:Path) -> bool:
 
   if fmt == 'gif':
     return run_cmd(f'ffmpeg -y -framerate {fps} -i "{sanitize_pathname(in_dp / r"%08d.png")}" "{sanitize_pathname(out_fp)}"')
-  else:
-    return run_cmd(f'ffmpeg -y -framerate {fps} -i "{sanitize_pathname(in_dp / r"%08d.png")}" -crf 20 -c:v libx264 -pix_fmt yuv420p "{sanitize_pathname(out_fp)}"')
+  if fmt == 'mp4':
+    return run_cmd(f'ffmpeg -y -framerate {fps} -i "{sanitize_pathname(in_dp / r"%08d.png")}" -crf 30 -c:v libx264 -pix_fmt yuv420p "{sanitize_pathname(out_fp)}"')
+  if fmt == 'webm':
+    # -c:v libvpx/libvpx-vp9/libaom-av1 (VP8/VP9/AV1)
+    # -b:v 0/1M
+    # -crf 15~30
+    return run_cmd(f'ffmpeg -y -framerate {fps} -i "{sanitize_pathname(in_dp / r"%08d.png")}" -crf 30 -c:v libvpx-vp9 -pix_fmt yuv420p "{sanitize_pathname(out_fp)}"')
 
 
-WINDOW_TITLE  = 'Postprocessor Pipeline GUI'
+WINDOW_TITLE  = f'Prompt Travel Manager v{__version__}'
 WINDOW_SIZE   = (700, 660)
 IMAGE_SIZE    = 512
 LIST_HEIGHT   = 100
@@ -106,10 +133,14 @@ MEMINFO_REFRESH = 16    # refresh status memory info every k-image loads
 HELP_INFO = '''
 [Settings]
   resr: model_name, upscale_ratio
+    - only realesr-animevideov3 supports custom upscale_ratio
+    - others are forced x4
   rife: model_name, interp_ratio (NOT frame count!!)
+    - only rife-v4 supports custom interp_ratio
+    - others are forced x2
   ffmpeg: export_format, export_fps
 
-The check boxes are enable swicthes specifying to run or not.
+The checkboxes are enable switches specifying to run or not :)
 '''
 
 
@@ -119,7 +150,7 @@ class App:
     self.setup_gui()
 
     self.is_running = False
-    self.cur_name = None  # str
+    self.cur_name = None  # str, current travel id
     self.cache = {}       # { 'name': [Image|Path] }
 
     self.p = psutil.Process(os.getpid())
@@ -148,7 +179,8 @@ class App:
 
     # menu
     menu = tk.Menu(wnd, tearoff=0)
-    menu.add_command(label='Open folder...', command=self._ls_open_dir)
+    menu.add_command(label='Open folder...', command=self._menu_open_dir)
+    menu.add_command(label='Remove folder', command=self._menu_remove_dir)
     menu.add_separator()
     menu.add_command(label='Memory cache clean', command=self.mem_clear)
     menu.add_command(label='Help', command=lambda: tkmsg.showinfo('Help', HELP_INFO))
@@ -201,11 +233,17 @@ class App:
             cb_r = ttk.Combobox(frm2111, text='ratio', values=[], textvariable=self.var_resr_r, state='readonly', width=COMBOX_WIDTH1)
             cb_m.grid(row=0, column=0, padx=2)
             cb_r.grid(row=0, column=1, padx=2)
+            self.cb_resr = cb_r
+
             def _cb_r_update():
               values = RESR_MODELS[self.var_resr_m.get()]
               cb_r.config(values=values)
               if self.var_resr_r.get() not in values:
                 self.var_resr_r.set(values[0])
+              if len(values) == 1:
+                self.cb_resr.config(state=tk.DISABLED)
+              else:
+                self.cb_resr.config(state=tk.NORMAL)
             cb_m.bind('<<ComboboxSelected>>', lambda evt: _cb_r_update())
             _cb_r_update()
 
@@ -216,6 +254,16 @@ class App:
             et = ttk.Entry(frm2112, text='ratio', textvariable=self.var_rife_r, width=ENTRY_WIDTH)
             cb.grid(row=0, column=0, padx=2)
             et.grid(row=0, column=1, padx=2)
+            self.et_rife = et
+
+            def _et_update():
+              if self.var_rife_m.get() != 'rife-v4':
+                self.var_rife_r.set(2)
+                self.et_rife.config(state=tk.DISABLED)
+              else:
+                self.et_rife.config(state=tk.NORMAL)
+            cb.bind('<<ComboboxSelected>>', lambda evt: _et_update())
+            _et_update()
 
           frm2113 = ttk.LabelFrame(frm211, text='FFmpeg')
           frm2113.pack(expand=tk.YES, fill=tk.X)
@@ -275,6 +323,30 @@ class App:
           sc.pack(anchor=tk.S, expand=tk.YES, fill=tk.X)
           self.sc = sc
 
+  def _menu_open_dir(self):
+    try: startfile(Path(self.var_root_dp.get()) / self.cur_name)
+    except: print_exc()
+
+  def _menu_remove_dir(self):
+    idx: tuple = self.ls.curselection()
+    if not idx: return
+    name = self.ls.get(idx)
+    if name is None: return
+
+    dp = Path(self.var_root_dp.get()) / name
+    if name in self.cache:
+      cnt = len(self.cache[name])
+    else:
+      cnt = len([fp for fp in dp.iterdir() if fp.suffix.lower() in ['.png', '.jpg', '.jpeg']])
+    
+    if not tkmsg.askyesno('Remove', f'Confirm to remove folder "{name}" with {cnt} images?'):
+      return
+
+    try:
+      shutil.rmtree(str(dp))
+      self.ls.delete(idx)
+    except: print_exc()
+
   def _mem_info_str(self, title='Mem'):
     mem = self.p.memory_info()
     return f'[{title}] rss: {mem.rss//2**20:.3f} MB, vms: {mem.vms//2**20:.3f} MB'
@@ -289,7 +361,12 @@ class App:
     info2 = self._mem_info_str('After')
     tkmsg.showinfo('Meminfo', info1 + '\n' + info2)
 
+    self.cnt_pv_load = 0
+    self.var_status.set(self._mem_info_str())
+
   def open_(self, root_dp:Path=None):
+    ''' Open a new travel root folder '''
+
     if root_dp is None:
       root_dp = tkfdlg.askdirectory(initialdir=str(OUTPUT_PATH))
     if not root_dp: return
@@ -311,6 +388,8 @@ class App:
     self._ls_change()
 
   def _ls_change(self):
+    ''' Open a new travel id folder '''
+
     idx: tuple = self.ls.curselection()
     if not idx: return
     name = self.ls.get(idx)
@@ -329,11 +408,9 @@ class App:
     self.var_fps_ip.set(0)
     self._pv_change()
 
-  def _ls_open_dir(self):
-    try: startfile(Path(self.var_root_dp.get()) / self.cur_name)
-    except: print_exc()
-
   def _pv_change(self, evt=None):
+    ''' Load a travel frame '''
+
     if not self.cur_name: return
 
     cache = self.cache[self.cur_name]
@@ -385,20 +462,21 @@ class App:
       try:
         self.is_running = True
         self.btn.config(state=tk.DISABLED, text='Running...')
-        
+
         if var_resr:
           assert run_resr(var_resr_m, var_resr_r, base_dp, base_dp / 'resr')
 
-          # NOTE: fix case of Embryo mode
-          embryo_fp: Path = base_dp / 'resr' / 'embryo.png'
-          if embryo_fp.exists(): embryo_fp.unlink()
-        
         if var_rife:
           assert run_rife(var_rife_m, var_rife_r, base_dp / 'resr', base_dp / 'rife')
-        
+
         if var_ffmpeg:
-          assert run_ffmpeg(var_ffmpeg_r, var_ffmpeg_f, base_dp / 'rife', base_dp)
-      
+          dp: Path = base_dp / 'rife'
+          if dp.exists():
+            assert run_ffmpeg(var_ffmpeg_r, var_ffmpeg_f, base_dp / 'rife', base_dp)
+          else:
+            if tkmsg.askyesno('Warn', 'rife results not found, try synth from resr results?'):
+              assert run_ffmpeg(var_ffmpeg_r, var_ffmpeg_f, base_dp / 'resr', base_dp)
+
         print(f'[Task] done ({time() - t:3f}s)')
         r = tkmsg.askyesno('Ok', 'Task done! Open output folder?')
         if r: startfile(base_dp)

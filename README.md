@@ -179,7 +179,7 @@ There are still two steps away from a really smooth and high resolution animatio
 
 #### setup once
 
-⚪ auto install (for Windows)
+⚪ auto install (Windows)
 
 - run `cd tools & install.cmd`
 - trouble shooting
@@ -187,12 +187,12 @@ There are still two steps away from a really smooth and high resolution animatio
   - if you got SSL errors about `curl schannel ... Unknown error ... certificate.`, the downloader not work due to some SSL security reasons, just turn to install manually...
 - you will have four components: [Busybox](https://frippery.org/busybox/), [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan), [RIFE](https://github.com/nihui/rife-ncnn-vulkan) and [FFmpeg](https://ffmpeg.org/) installed under the [tools](tools) folder
 
-⚪ manually install (for Windows/Linux/Mac)
+⚪ manually install (Windows/Linux/Mac)
 
 ℹ Understand the `tools` folder layout first => [tools/README.txt](tools/README.txt)  
 ℹ If you indeed wanna put the tools elsewhere, modify paths in [tools/link.cmd](tools/link.cmd) and run `cd tools & link.cmd` 😉
 
-For **Windows**: 
+For Windows: 
 
 - download [Busybox](https://frippery.org/busybox/)
 - download [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN/releases) (e.g.: `realesrgan-ncnn-vulkan-20220424-windows.zip`)
@@ -200,7 +200,7 @@ For **Windows**:
 - download [rife-ncnn-vulkan](https://github.com/nihui/rife-ncnn-vulkan/releases) bundle (e.g.: `rife-ncnn-vulkan-20221029-windows.zip `)
 - download [FFmpeg](https://ffmpeg.org/download.html) binary (e.g.: `ffmpeg-release-full-shared.7z` or `ffmpeg-git-full.7z`)
 
-For **Linux/Mac**: 
+For Linux/Mac: 
 
 - download [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN/releases) and [rife-ncnn-vulkan](https://github.com/nihui/rife-ncnn-vulkan/releases), put them according to the `tools` folder layout, manually apply `chmod 755` to the executables
 - `ffmpeg` can be easily found in your app store or package manager, run like `apt install ffmpeg`; DO NOT need to link it under `tools` folder
@@ -208,18 +208,23 @@ For **Linux/Mac**:
 
 #### run each time
 
-⚪ tkinter GUI (for Windows/Linux/Mac)
+⚪ tkinter GUI (Windows/Linux/Mac)
 
-![postprocessor](img/postprocessor-gui.png)
+![manager](img/manager.png)
 
-- start webui's python venv
-  - for Windows: run `cmd_here.cmd`
-  - for Linux/Mac: run `../../venv/Scripts/activate`
-- run `pip install -r requirements.txt` (only setup once)
-- run `python postprocessor.py`, or for Windows just run the [DOSKEY](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/doskey) `pp`
-- find usage help message in right click pop menu to start
+For Windows:
+  - run `manager.cmd`, to start webui's python venv
+  - run the [DOSKEY](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/doskey) `install` (only setup once)
+  - run the DOSKEY `run`
 
-⚪ <del> cmd script (for Windows) </del>
+For Linux/Mac:
+  - run `../../venv/Scripts/activate`, to start webui's python venv
+  - run `pip install -r requirements.txt` (only setup once)
+  - run `python manager.py`
+
+ℹ find usage help message in right click pop menu~
+
+⚪ <del> cmd script (Windows) - deprecated </del>
 
 - check params in [postprocess-config.cmd](postprocess-config.cmd)
 - pick one way to start 😃
