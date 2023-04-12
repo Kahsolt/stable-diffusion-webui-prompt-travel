@@ -122,12 +122,12 @@ def run_ffmpeg(fps:float, fmt:str, in_dp:Path, out_dp:Path) -> bool:
 
 
 WINDOW_TITLE  = f'Prompt Travel Manager v{__version__}'
-WINDOW_SIZE   = (700, 660)
+WINDOW_SIZE   = (710, 660)
 IMAGE_SIZE    = 512
 LIST_HEIGHT   = 100
-COMBOX_WIDTH  = 16
-COMBOX_WIDTH1 = 5
-ENTRY_WIDTH   = 8
+COMBOX_WIDTH  = 18
+COMBOX_WIDTH1 = 4
+ENTRY_WIDTH   = 7
 MEMINFO_REFRESH = 16    # refresh status memory info every k-image loads
 
 HELP_INFO = '''
@@ -172,7 +172,7 @@ class App:
     W, H = wnd.winfo_screenwidth(), wnd.winfo_screenheight()
     w, h = WINDOW_SIZE
     wnd.geometry(f'{w}x{h}+{(W-w)//2}+{(H-h)//2}')
-    #wnd.resizable(False, False)
+    wnd.resizable(False, False)
     wnd.title(WINDOW_TITLE)
     wnd.protocol('WM_DELETE_WINDOW', wnd.quit)
     self.wnd = wnd
@@ -195,6 +195,7 @@ class App:
       self.var_root_dp = tk.StringVar(wnd)
       tk.Entry(frm1, textvariable=self.var_root_dp).pack(side=tk.LEFT, expand=tk.YES, fill=tk.X)
       tk.Button(frm1, text='Open..', command=self.open_).pack(side=tk.RIGHT)
+      tk.Button(frm1, text='Refresh', command=lambda: self.open_(refresh=True)).pack(side=tk.RIGHT)
     
     # bottom status
     # NOTE: do not know why the display order is messy...
@@ -364,11 +365,11 @@ class App:
     self.cnt_pv_load = 0
     self.var_status.set(self._mem_info_str())
 
-  def open_(self, root_dp:Path=None):
+  def open_(self, root_dp:Path=None, refresh=False):
     ''' Open a new travel root folder '''
 
-    if root_dp is None:
-      root_dp = tkfdlg.askdirectory(initialdir=str(OUTPUT_PATH))
+    if refresh: root_dp = self.var_root_dp.get()
+    if root_dp is None: root_dp = tkfdlg.askdirectory(initialdir=str(OUTPUT_PATH))
     if not root_dp: return
     if not Path(root_dp).exists():
       tkmsg.showerror('Error', f'invalid path: {root_dp} not exist')
@@ -397,8 +398,11 @@ class App:
 
     self.cur_name = name
     if name not in self.cache:
-      dp = Path(self.var_root_dp.get()) / name
-      self.cache[name] = sorted([fp for fp in dp.iterdir() if fp.suffix.lower() in ['.png', '.jpg', '.jpeg'] and fp.stem != 'embryo'])
+      dp: Path = Path(self.var_root_dp.get()) / name
+      if dp.exists():
+        self.cache[name] = sorted([fp for fp in dp.iterdir() if fp.suffix.lower() in ['.png', '.jpg', '.jpeg'] and fp.stem != 'embryo'])
+      else:
+        self.ls.delete(idx)
 
     n_imgs = len(self.cache[name])
     self.sc.config(to=n_imgs-1)

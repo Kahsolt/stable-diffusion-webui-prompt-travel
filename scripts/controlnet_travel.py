@@ -1,28 +1,41 @@
-import gc
-
 from scripts.prompt_travel import *
+from manager import run_cmd
+
+from modules.scripts import ScriptRunner
 
 class InterpMethod(Enum):
     LINEAR = 'linear (weight sum)'
-    #RIFE   = 'rife (optical flow)'
+    RIFE   = 'rife (optical flow)'
 
 if 'global consts':
     __ = lambda key, value=None: opts.data.get(f'customscript/controlnet_travel.py/txt2img/{key}/value', value)
 
+    WEBUI_PATH = Path.cwd()
+    PTRAVEL_PATH = WEBUI_PATH / 'extensions' / 'stable-diffusion-webui-prompt-travel'
+
     LABEL_CTRLNET_REF_DIR   = 'Reference image folder (one ref image per stage :)'
     LABEL_INTERP_METH       = 'Interpolate method'
+    LABEL_SKIP_FUSE         = 'Ext. skip latent fusion'
+    LABEL_DEBUG_RIFE        = 'Save RIFE intermediates'
 
-    DEFAULT_CTRLNET_REF_DIR = __(LABEL_CTRLNET_REF_DIR, '')
+    DEFAULT_STEPS           = 10
+    DEFAULT_CTRLNET_REF_DIR = str(PTRAVEL_PATH / 'img' / 'ref_ctrlnet')
     DEFAULT_INTERP_METH     = __(LABEL_INTERP_METH, InterpMethod.LINEAR.value)
+    DEFAULT_SKIP_FUSE       = __(LABEL_SKIP_FUSE, False)
+    DEFAULT_DEBUG_RIFE      = __(LABEL_DEBUG_RIFE, False)
 
     CHOICES_INTERP_METH     = [x.value for x in InterpMethod]
 
+if 'global vars':
+    skip_fuse_plan: List[bool] = []                 # n_blocks (13)
 
-import matplotlib.pyplot as plt
-
-def _dbg_hint_cond(hint_cond:Tensor):
-    plt.imshow(hint_cond.permute([2, 1, 0]).detach().cpu().numpy())
-    plt.show()
+    interp_alpha: float = 0
+    interp_ip: int = 0                              # 0 ~ n_sampling_step-1
+    from_hint_cond: List[Tensor] = []               # n_contrlnet_set
+    to_hint_cond: List[Tensor] = []
+    mid_hint_cond: List[Tensor] = []
+    from_control_tensors: List[List[Tensor]] = []   # n_sampling_step x n_blocks
+    to_control_tensors: List[List[Tensor]] = []
 
 
 # ↓↓↓ the following is modified from 'sd-webui-controlnet/scripts/hook.py' ↓↓↓
@@ -34,7 +47,7 @@ try:
 except:
     controlnet_found = False
 
-def cfg_based_adder(base, x, require_autocast, is_adapter=False):
+def cfg_based_adder(self:UnetHook, base:Tensor, x:Tensor, require_autocast:bool, is_adapter=False):
     if isinstance(x, float):
         return base + x
     
@@ -69,7 +82,7 @@ def cfg_based_adder(base, x, require_autocast, is_adapter=False):
     
     return base + x
 
-def forward(outer: UnetHook, x:Tensor, timesteps:Tensor=None, context:Tensor=None, **kwargs):
+def forward(outer:UnetHook, x:Tensor, timesteps:Tensor=None, context:Tensor=None, **kwargs):
     ''' NOTE: This function is called `sampling_steps*2` times (once for cond & uncond respectively) '''
 
     total_control = [0.0] * 13
@@ -79,7 +92,7 @@ def forward(outer: UnetHook, x:Tensor, timesteps:Tensor=None, context:Tensor=Non
     require_inpaint_hijack = False
 
     # NOTE: declare globals
-    global from_hint_cond, to_hint_cond, from_control_tensors, to_control_tensors, mid_hint_cond, interp_alpha, interp_ip, interp_fn
+    global from_hint_cond, to_hint_cond, from_control_tensors, to_control_tensors, mid_hint_cond, interp_alpha, interp_ip
     self: UNetModel = shared.sd_model.model.diffusion_model
     x: Tensor           # [1, 4, 64, 64]
     context: Tensor     # [1, 77, 768]
@@ -138,10 +151,10 @@ def forward(outer: UnetHook, x:Tensor, timesteps:Tensor=None, context:Tensor=Non
 
         # NOTE: perform hint shallow fusion here
         if interp_alpha == 0.0:     # collect hind_cond on key frames
-            if len(to_hint_cond) < i + 1:
+            if len(to_hint_cond) < len(outer.control_params):
                 to_hint_cond.append(param.hint_cond.cpu().clone())
         else:                       # interp with cached hind_cond
-            param.hint_cond = mid_hint_cond[i]
+            param.hint_cond = mid_hint_cond[i].to(x_in.device)
 
         assert param.hint_cond is not None, f"Controlnet is enabled but no input image is given"
         control = param.control_model(x=x_in, hint=param.hint_cond, timesteps=timesteps, context=context)
@@ -165,13 +178,20 @@ def forward(outer: UnetHook, x:Tensor, timesteps:Tensor=None, context:Tensor=Non
 
     # NOTE: perform latent fusion here
     if interp_alpha == 0.0:     # collect control tensors on key frames
-        to_control_tensors.append([t.cpu().clone() for t in total_control])
+        tensors: List[Tensor] = []
+        for i, t in enumerate(total_control):
+            if len(skip_fuse_plan) and skip_fuse_plan[i]:
+                tensors.append(None)
+            else:
+                tensors.append(t.cpu().clone())
+        to_control_tensors.append(tensors)
     else:                       # interp with cached control tensors
         device = total_control[0].device
         for i, (ctrlA, ctrlB) in enumerate(zip(from_control_tensors[interp_ip], to_control_tensors[interp_ip])):
-            ctrlC = interp_fn(ctrlA.to(device), ctrlB.to(device), interp_alpha)
-            #print('  ctrl diff:', (ctrlC - total_control[i]).abs().mean().item())
-            total_control[i].data = ctrlC
+            if ctrlA is not None and ctrlB is not None:
+                ctrlC = weighted_sum(ctrlA.to(device), ctrlB.to(device), interp_alpha)
+                #print('  ctrl diff:', (ctrlC - total_control[i]).abs().mean().item())
+                total_control[i].data = ctrlC
         interp_ip += 1
 
     control = total_control
@@ -186,13 +206,13 @@ def forward(outer: UnetHook, x:Tensor, timesteps:Tensor=None, context:Tensor=Non
             
             # t2i-adatper, same as openaimodel.py:744
             if ((i+1)%3 == 0) and len(total_adapter):
-                h = cfg_based_adder(h, total_adapter.pop(0), require_inpaint_hijack, is_adapter=True)
-                
+                h = cfg_based_adder(outer, h, total_adapter.pop(0), require_inpaint_hijack, is_adapter=True)
+
             hs.append(h)
         h = self.middle_block(h, emb, context)
 
     control_in = control.pop()
-    h = cfg_based_adder(h, control_in, require_inpaint_hijack)
+    h = cfg_based_adder(outer, h, control_in, require_inpaint_hijack)
 
     for i, module in enumerate(self.output_blocks):
         if only_mid_control:
@@ -200,7 +220,7 @@ def forward(outer: UnetHook, x:Tensor, timesteps:Tensor=None, context:Tensor=Non
             h = th.cat([h, hs_input], dim=1)
         else:
             hs_input, control_input = hs.pop(), control.pop()
-            h = th.cat([h, cfg_based_adder(hs_input, control_input, require_inpaint_hijack)], dim=1)
+            h = th.cat([h, cfg_based_adder(outer, hs_input, control_input, require_inpaint_hijack)], dim=1)
         h = module(h, emb, context)
 
     h = h.type(x.dtype)
@@ -219,309 +239,21 @@ def forward2(self: UnetHook, *args, **kwargs):
 
 # ↑↑↑ the above is modified from 'sd-webui-controlnet/scripts/hook.py' ↑↑↑
 
-
-# ↓↓↓ the following is modified from 'modules/processing.py' ↓↓↓
-
-from modules.processing import *
-
-def process_images(p: StableDiffusionProcessing) -> Processed:
-    stored_opts = {k: opts.data[k] for k in p.override_settings.keys()}
+def reset_cuda():
+    devices.torch_gc()
+    import gc; gc.collect()
 
     try:
-        for k, v in p.override_settings.items():
-            setattr(opts, k, v)
+        import os
+        import psutil
+        mem = psutil.Process(os.getpid()).memory_info()
+        print(f'[Mem] rss: {mem.rss/2**30:.3f} GB, vms: {mem.vms/2**30:.3f} GB')
+        from modules.shared import mem_mon as vram_mon
+        free, total = vram_mon.cuda_mem_get_info()
+        print(f'[VRAM] free: {free/2**30:.3f} GB, total: {total/2**30:.3f} GB')
+    except:
+        pass
 
-            if k == 'sd_model_checkpoint':
-                sd_models.reload_model_weights()
-
-            if k == 'sd_vae':
-                sd_vae.reload_vae_weights()
-
-        res = process_images_inner(p)
-
-    finally:
-        # restore opts to original state
-        if p.override_settings_restore_afterwards:
-            for k, v in stored_opts.items():
-                setattr(opts, k, v)
-                if k == 'sd_model_checkpoint':
-                    sd_models.reload_model_weights()
-
-                if k == 'sd_vae':
-                    sd_vae.reload_vae_weights()
-
-    return res
-
-def process_images_inner(p: StableDiffusionProcessing) -> Processed:
-    """this is the main loop that both txt2img and img2img use; it calls func_init once inside all the scopes and func_sample once per batch"""
-
-    if type(p.prompt) == list:
-        assert(len(p.prompt) > 0)
-    else:
-        assert p.prompt is not None
-
-    devices.torch_gc()
-
-    seed = get_fixed_seed(p.seed)
-    subseed = get_fixed_seed(p.subseed)
-
-    modules.sd_hijack.model_hijack.apply_circular(p.tiling)
-    modules.sd_hijack.model_hijack.clear_comments()
-
-    comments = {}
-
-    if type(p.prompt) == list:
-        p.all_prompts = [shared.prompt_styles.apply_styles_to_prompt(x, p.styles) for x in p.prompt]
-    else:
-        p.all_prompts = p.batch_size * p.n_iter * [shared.prompt_styles.apply_styles_to_prompt(p.prompt, p.styles)]
-
-    if type(p.negative_prompt) == list:
-        p.all_negative_prompts = [shared.prompt_styles.apply_negative_styles_to_prompt(x, p.styles) for x in p.negative_prompt]
-    else:
-        p.all_negative_prompts = p.batch_size * p.n_iter * [shared.prompt_styles.apply_negative_styles_to_prompt(p.negative_prompt, p.styles)]
-
-    if type(seed) == list:
-        p.all_seeds = seed
-    else:
-        p.all_seeds = [int(seed) + (x if p.subseed_strength == 0 else 0) for x in range(len(p.all_prompts))]
-
-    if type(subseed) == list:
-        p.all_subseeds = subseed
-    else:
-        p.all_subseeds = [int(subseed) + x for x in range(len(p.all_prompts))]
-
-    def infotext(iteration=0, position_in_batch=0):
-        return create_infotext(p, p.all_prompts, p.all_seeds, p.all_subseeds, comments, iteration, position_in_batch)
-
-    if os.path.exists(cmd_opts.embeddings_dir) and not p.do_not_reload_embeddings:
-        model_hijack.embedding_db.load_textual_inversion_embeddings()
-
-    if p.scripts is not None:
-        p.scripts.process(p)
-    
-    # NOTE: hijack over ControlNet's hijack
-    global controlnet_script
-    assert controlnet_script, 'Error: controlnet script not found'
-    unethook: UnetHook = controlnet_script.latest_network
-    assert unethook, 'Error: UnetHook is None! You silly forgot to enable or set up ControlNet?'
-    unet: UNetModel = p.sd_model.model.diffusion_model
-    assert unet._original_forward,  'Error: Unet did not hook on? You silly forgot to enable or set up ControlNet?'
-    control_params: List[ControlParams] = unethook.control_params
-    assert control_params, 'Error: ControlParams is None! You silly forgot to enable or set up ControlNet?'
-    saved_unet_forward = unet.forward
-    unet.forward = lambda *args, **kwargs: forward2(unethook, *args, **kwargs)
-    setattr(p, 'detected_map', None)
-
-    infotexts = []
-    output_images = []
-
-    cached_uc = [None, None]
-    cached_c = [None, None]
-
-    def get_conds_with_caching(function, required_prompts, steps, cache):
-        """
-        Returns the result of calling function(shared.sd_model, required_prompts, steps)
-        using a cache to store the result if the same arguments have been used before.
-
-        cache is an array containing two elements. The first element is a tuple
-        representing the previously used arguments, or None if no arguments
-        have been used before. The second element is where the previously
-        computed result is stored.
-        """
-
-        if cache[0] is not None and (required_prompts, steps) == cache[0]:
-            return cache[1]
-
-        with devices.autocast():
-            cache[1] = function(shared.sd_model, required_prompts, steps)
-
-        cache[0] = (required_prompts, steps)
-        return cache[1]
-
-    with torch.no_grad(), p.sd_model.ema_scope():
-        with devices.autocast():
-            p.init(p.all_prompts, p.all_seeds, p.all_subseeds)
-
-            # for OSX, loading the model during sampling changes the generated picture, so it is loaded here
-            if shared.opts.live_previews_enable and opts.show_progress_type == "Approx NN":
-                sd_vae_approx.model()
-
-        if state.job_count == -1:
-            state.job_count = p.n_iter
-
-        extra_network_data = None
-        for n in range(p.n_iter):
-            p.iteration = n
-
-            if state.skipped:
-                state.skipped = False
-
-            if state.interrupted:
-                break
-
-            prompts = p.all_prompts[n * p.batch_size:(n + 1) * p.batch_size]
-            negative_prompts = p.all_negative_prompts[n * p.batch_size:(n + 1) * p.batch_size]
-            seeds = p.all_seeds[n * p.batch_size:(n + 1) * p.batch_size]
-            subseeds = p.all_subseeds[n * p.batch_size:(n + 1) * p.batch_size]
-
-            if p.scripts is not None:
-                p.scripts.before_process_batch(p, batch_number=n, prompts=prompts, seeds=seeds, subseeds=subseeds)
-
-            if len(prompts) == 0:
-                break
-
-            prompts, extra_network_data = extra_networks.parse_prompts(prompts)
-
-            if not p.disable_extra_networks:
-                with devices.autocast():
-                    extra_networks.activate(p, extra_network_data)
-
-            if p.scripts is not None:
-                p.scripts.process_batch(p, batch_number=n, prompts=prompts, seeds=seeds, subseeds=subseeds)
-
-            # params.txt should be saved after scripts.process_batch, since the
-            # infotext could be modified by that callback
-            # Example: a wildcard processed by process_batch sets an extra model
-            # strength, which is saved as "Model Strength: 1.0" in the infotext
-            if n == 0:
-                with open(os.path.join(paths.data_path, "params.txt"), "w", encoding="utf8") as file:
-                    processed = Processed(p, [], p.seed, "")
-                    file.write(processed.infotext(p, 0))
-
-            uc = get_conds_with_caching(prompt_parser.get_learned_conditioning, negative_prompts, p.steps, cached_uc)
-            c = get_conds_with_caching(prompt_parser.get_multicond_learned_conditioning, prompts, p.steps, cached_c)
-
-            if len(model_hijack.comments) > 0:
-                for comment in model_hijack.comments:
-                    comments[comment] = 1
-
-            if p.n_iter > 1:
-                shared.state.job = f"Batch {n+1} out of {p.n_iter}"
-
-            with devices.without_autocast() if devices.unet_needs_upcast else devices.autocast():
-                samples_ddim = p.sample(conditioning=c, unconditional_conditioning=uc, seeds=seeds, subseeds=subseeds, subseed_strength=p.subseed_strength, prompts=prompts)
-
-            x_samples_ddim = [decode_first_stage(p.sd_model, samples_ddim[i:i+1].to(dtype=devices.dtype_vae))[0].cpu() for i in range(samples_ddim.size(0))]
-            for x in x_samples_ddim:
-                devices.test_for_nans(x, "vae")
-
-            x_samples_ddim = torch.stack(x_samples_ddim).float()
-            x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
-
-            del samples_ddim
-
-            if shared.cmd_opts.lowvram or shared.cmd_opts.medvram:
-                lowvram.send_everything_to_cpu()
-
-            devices.torch_gc()
-
-            if p.scripts is not None:
-                p.scripts.postprocess_batch(p, x_samples_ddim, batch_number=n)
-
-            for i, x_sample in enumerate(x_samples_ddim):
-                x_sample = 255. * np.moveaxis(x_sample.cpu().numpy(), 0, 2)
-                x_sample = x_sample.astype(np.uint8)
-
-                if p.restore_faces:
-                    if opts.save and not p.do_not_save_samples and opts.save_images_before_face_restoration:
-                        images.save_image(Image.fromarray(x_sample), p.outpath_samples, "", seeds[i], prompts[i], opts.samples_format, info=infotext(n, i), p=p, suffix="-before-face-restoration")
-
-                    devices.torch_gc()
-
-                    x_sample = modules.face_restoration.restore_faces(x_sample)
-                    devices.torch_gc()
-
-                image = Image.fromarray(x_sample)
-
-                if p.scripts is not None:
-                    pp = scripts.PostprocessImageArgs(image)
-                    p.scripts.postprocess_image(p, pp)
-                    image = pp.image
-
-                if p.color_corrections is not None and i < len(p.color_corrections):
-                    if opts.save and not p.do_not_save_samples and opts.save_images_before_color_correction:
-                        image_without_cc = apply_overlay(image, p.paste_to, i, p.overlay_images)
-                        images.save_image(image_without_cc, p.outpath_samples, "", seeds[i], prompts[i], opts.samples_format, info=infotext(n, i), p=p, suffix="-before-color-correction")
-                    image = apply_color_correction(p.color_corrections[i], image)
-
-                image = apply_overlay(image, p.paste_to, i, p.overlay_images)
-
-                if opts.samples_save and not p.do_not_save_samples:
-                    images.save_image(image, p.outpath_samples, "", seeds[i], prompts[i], opts.samples_format, info=infotext(n, i), p=p)
-
-                text = infotext(n, i)
-                infotexts.append(text)
-                if opts.enable_pnginfo:
-                    image.info["parameters"] = text
-                output_images.append(image)
-
-                if hasattr(p, 'mask_for_overlay') and p.mask_for_overlay:
-                    image_mask = p.mask_for_overlay.convert('RGB')
-                    image_mask_composite = Image.composite(image.convert('RGBA').convert('RGBa'), Image.new('RGBa', image.size), p.mask_for_overlay.convert('L')).convert('RGBA')
-
-                    if opts.save_mask:
-                        images.save_image(image_mask, p.outpath_samples, "", seeds[i], prompts[i], opts.samples_format, info=infotext(n, i), p=p, suffix="-mask")
-
-                    if opts.save_mask_composite:
-                        images.save_image(image_mask_composite, p.outpath_samples, "", seeds[i], prompts[i], opts.samples_format, info=infotext(n, i), p=p, suffix="-mask-composite")
-
-                    if opts.return_mask:
-                        output_images.append(image_mask)
-                    
-                    if opts.return_mask_composite:
-                        output_images.append(image_mask_composite)
-
-            del x_samples_ddim
-
-            devices.torch_gc()
-
-            state.nextjob()
-
-        p.color_corrections = None
-
-        index_of_first_image = 0
-        unwanted_grid_because_of_img_count = len(output_images) < 2 and opts.grid_only_if_multiple
-        if (opts.return_grid or opts.grid_save) and not p.do_not_save_grid and not unwanted_grid_because_of_img_count:
-            grid = images.image_grid(output_images, p.batch_size)
-
-            if opts.return_grid:
-                text = infotext()
-                infotexts.insert(0, text)
-                if opts.enable_pnginfo:
-                    grid.info["parameters"] = text
-                output_images.insert(0, grid)
-                index_of_first_image = 1
-
-            if opts.grid_save:
-                images.save_image(grid, p.outpath_grids, "grid", p.all_seeds[0], p.all_prompts[0], opts.grid_format, info=infotext(), short_filename=not opts.grid_extended_filename, p=p, grid=True)
-
-    if not p.disable_extra_networks and extra_network_data:
-        extra_networks.deactivate(p, extra_network_data)
-
-    devices.torch_gc()
-
-    res = Processed(p, output_images, p.all_seeds[0], infotext(), comments="".join(["\n\n" + x for x in comments]), subseed=p.all_subseeds[0], index_of_first_image=index_of_first_image, infotexts=infotexts)
-
-    # NOTE:hijack ControlNet's hijack
-    unet.forward = saved_unet_forward
-
-    if p.scripts is not None:
-        p.scripts.postprocess(p, res)
-
-    return res
-
-# ↑↑↑ the above is modified from 'modules/processing.py' ↑↑↑
-
-
-controlnet_script = None
-interp_fn: Callable = None
-interp_alpha: float = 0
-interp_ip: int = 0
-from_hint_cond: List[Tensor] = []
-to_hint_cond: List[Tensor] = []
-mid_hint_cond: List[Tensor] = []
-from_control_tensors: List[List[Tensor]] = []
-to_control_tensors: List[List[Tensor]] = []
 
 class Script(scripts.Script):
 
@@ -532,7 +264,6 @@ class Script(scripts.Script):
         return 'Travel from one controlnet hint to another in the latent space.'
 
     def show(self, is_img2img):
-        global controlnet_found
         if not controlnet_found: print('extension Mikubill/sd-webui-controlnet not found, ControlNet Travel ignored')
         return controlnet_found
 
@@ -540,9 +271,31 @@ class Script(scripts.Script):
         with gr.Row(variant='compact'):
             interp_meth = gr.Dropdown(label=LABEL_INTERP_METH, value=lambda: DEFAULT_INTERP_METH, choices=CHOICES_INTERP_METH)
             steps       = gr.Text    (label=LABEL_STEPS,       value=lambda: DEFAULT_STEPS, max_lines=1)
+            
+            reset = gr.Button(value='Reset Cuda', variant='tool')
+            reset.click(fn=reset_cuda, show_progress=False)
 
         with gr.Row(variant='compact'):
             ctrlnet_ref_dir = gr.Text(label=LABEL_CTRLNET_REF_DIR, value=lambda: DEFAULT_CTRLNET_REF_DIR, max_lines=1)
+
+        with gr.Group(visible=DEFAULT_SKIP_FUSE) as tab_ext_skip_fuse:
+            with gr.Row(variant='compact'):
+                skip_in_0  = gr.Checkbox(label='in_0')
+                skip_in_3  = gr.Checkbox(label='in_3')
+                skip_out_0 = gr.Checkbox(label='out_0')
+                skip_out_3 = gr.Checkbox(label='out_3')
+            with gr.Row(variant='compact'):
+                skip_in_1  = gr.Checkbox(label='in_1')
+                skip_in_4  = gr.Checkbox(label='in_4')
+                skip_out_1 = gr.Checkbox(label='out_1')
+                skip_out_4 = gr.Checkbox(label='out_4')
+            with gr.Row(variant='compact'):
+                skip_in_2  = gr.Checkbox(label='in_2')
+                skip_in_5  = gr.Checkbox(label='in_5')
+                skip_out_2 = gr.Checkbox(label='out_2')
+                skip_out_5 = gr.Checkbox(label='out_5')
+            with gr.Row(variant='compact'):
+                skip_mid   = gr.Checkbox(label='mid')
 
         with gr.Row(variant='compact', visible=DEFAULT_UPSCALE) as tab_ext_upscale:
             upscale_meth   = gr.Dropdown(label=LABEL_UPSCALE_METH,   value=lambda: DEFAULT_UPSCALE_METH,   choices=CHOICES_UPSCALER)
@@ -557,22 +310,58 @@ class Script(scripts.Script):
             video_pick = gr.Text    (label=LABEL_VIDEO_PICK, value=lambda: DEFAULT_VIDEO_PICK, max_lines=1)
 
         with gr.Row(variant='compact') as tab_ext:
-            ext_video   = gr.Checkbox(label=LABEL_VIDEO,   value=lambda: DEFAULT_VIDEO) 
-            ext_upscale = gr.Checkbox(label=LABEL_UPSCALE, value=lambda: DEFAULT_UPSCALE) 
+            ext_video     = gr.Checkbox(label=LABEL_VIDEO,      value=lambda: DEFAULT_VIDEO)
+            ext_upscale   = gr.Checkbox(label=LABEL_UPSCALE,    value=lambda: DEFAULT_UPSCALE)
+            ext_skip_fuse = gr.Checkbox(label=LABEL_SKIP_FUSE,  value=lambda: DEFAULT_SKIP_FUSE)
+            dbg_rife      = gr.Checkbox(label=LABEL_DEBUG_RIFE, value=lambda: DEFAULT_DEBUG_RIFE)
         
-            ext_video  .change(fn=lambda x: gr_show(x), inputs=ext_video,   outputs=tab_ext_video,   show_progress=False)
-            ext_upscale.change(fn=lambda x: gr_show(x), inputs=ext_upscale, outputs=tab_ext_upscale, show_progress=False)
+            ext_video    .change(fn=lambda x: gr_show(x), inputs=ext_video,     outputs=tab_ext_video,     show_progress=False)
+            ext_upscale  .change(fn=lambda x: gr_show(x), inputs=ext_upscale,   outputs=tab_ext_upscale,   show_progress=False)
+            ext_skip_fuse.change(fn=lambda x: gr_show(x), inputs=ext_skip_fuse, outputs=tab_ext_skip_fuse, show_progress=False)
 
+        skip_fuses = [
+            skip_in_0,
+            skip_in_1,
+            skip_in_2,
+            skip_in_3,
+            skip_in_4,
+            skip_in_5,
+            skip_mid,
+            skip_out_0,
+            skip_out_1,
+            skip_out_2,
+            skip_out_3,
+            skip_out_4,
+            skip_out_5,
+        ]
         return [interp_meth, steps, ctrlnet_ref_dir,
                 upscale_meth, upscale_ratio, upscale_width, upscale_height,
                 video_fmt, video_fps, video_pad, video_pick,
-                ext_video, ext_upscale]
+                ext_video, ext_upscale, ext_skip_fuse, dbg_rife,
+                *skip_fuses]
 
     def run(self, p:StableDiffusionProcessing, 
             interp_meth:str, steps:str, ctrlnet_ref_dir:str, 
             upscale_meth:str, upscale_ratio:float, upscale_width:int, upscale_height:int,
             video_fmt:str, video_fps:float, video_pad:int, video_pick:str,
-            ext_video:bool, ext_upscale:bool):
+            ext_video:bool, ext_upscale:bool, ext_skip_fuse:bool, dbg_rife:bool,
+            *skip_fuses:bool):
+
+        # Prepare ControlNet
+        self.controlnet_script = None
+        self.hooked = None
+        try:
+            from scripts.controlnet import Script as ControlNetScript
+            from scripts.external_code import ControlNetUnit
+            for script in p.scripts.alwayson_scripts:
+                if hasattr(script, "latest_network") and script.title().lower() == "controlnet":
+                    script_args: Tuple[ControlNetUnit] = p.script_args[script.args_from:script.args_to]
+                    if not any([u.enabled for u in script_args]): return Processed(p, [], p.seed, 'sd-webui-controlnet not enabled')
+                    self.controlnet_script: ControlNetScript = script
+                    break
+        except ImportError:
+            return Processed(p, [], p.seed, 'sd-webui-controlnet not installed')
+        if not self.controlnet_script: return Processed(p, [], p.seed, 'sd-webui-controlnet not loaded')
 
         # enum lookup
         interp_meth: InterpMethod = InterpMethod(interp_meth)
@@ -584,18 +373,9 @@ class Script(scripts.Script):
             if video_fps <= 0: return Processed(p, [], p.seed, f'video_fps must > 0, but got {video_fps}')
             try: video_slice = parse_slice(video_pick)
             except: return Processed(p, [], p.seed, 'syntax error in video_slice')
-
-        # Prepare ControlNet
-        global controlnet_script
-        try:
-            from scripts.cldm import ControlNet
-            for script in p.scripts.alwayson_scripts:
-                if hasattr(script, "latest_network") and script.title().lower() == "controlnet":
-                    controlnet_script = script
-                    break
-        except ImportError:
-            pass
-        if not controlnet_script: return Processed(p, [], p.seed, 'extension Mikubill/sd-webui-controlnet not running, why?')
+        if ext_skip_fuse:
+            global skip_fuse_plan
+            skip_fuse_plan = skip_fuses
 
         # Prepare ref-images
         if not ctrlnet_ref_dir: return Processed(p, [], p.seed, f'invalid image folder path: {ctrlnet_ref_dir}')
@@ -625,6 +405,8 @@ class Script(scripts.Script):
         self.log_dp = os.path.join(travel_path, f'{travel_number:05}')
         p.outpath_samples = self.log_dp
         os.makedirs(self.log_dp, exist_ok=True)
+        self.tmp_dp = Path(self.log_dp) / 'ctrl_cond'       # cache for rife
+        self.tmp_fp = self.tmp_dp / 'tmp.png'               # cache for rife
 
         # Force Batch Count and Batch Size to 1
         p.n_iter     = 1
@@ -641,21 +423,48 @@ class Script(scripts.Script):
         # Start job
         state.job_count = n_frames
 
-        # Pack parameters
-        self.lerp_meth  = interp_meth
-        self.steps      = steps
-        self.n_stages   = n_stages
-        self.n_frames   = n_frames
-
-        global interp_fn
-        if interp_meth == InterpMethod.LINEAR:
-            interp_fn = weighted_sum
-        elif interp_meth == InterpMethod.RIFE:
-            pass
+        # Pack params
+        self.n_stages    = n_stages
+        self.steps       = steps
+        self.interp_meth = interp_meth
+        self.dbg_rife    = dbg_rife
 
         def save_image_hijack(params:ImageSaveParams):
             if not ext_upscale: return
             params.image = upscale_image(params.image, p.width, p.height, upscale_meth, upscale_ratio, upscale_width, upscale_height)
+
+        images = []
+        info = ''
+        script_runner: ScriptRunner = p.scripts
+        caches: List[List[Tensor]] = [from_hint_cond, to_hint_cond, mid_hint_cond, from_control_tensors, to_control_tensors]
+        try:
+            if self not in script_runner.alwayson_scripts: script_runner.alwayson_scripts.append(self)
+            on_before_image_saved(save_image_hijack)
+
+            [c.clear() for c in caches]
+            images, info = self.run_linear(p)
+        finally:
+            if self.tmp_fp.exists(): os.unlink(self.tmp_fp)
+            [c.clear() for c in caches]
+
+            remove_callbacks_for_function(save_image_hijack)
+            if self in script_runner.alwayson_scripts: script_runner.alwayson_scripts.remove(self)
+
+            self.controlnet_script.input_image = None
+            if self.controlnet_script.latest_network:
+                self.controlnet_script.latest_network.restore(p.sd_model.model.diffusion_model)
+                self.controlnet_script.latest_network = None
+            self.postprocess_batch(p)    # assure unhook
+
+            reset_cuda()
+
+        # Save video
+        if ext_video: save_video(images, video_slice, video_pad, video_fps, video_fmt, os.path.join(self.log_dp, f'travel-{travel_number:05}'))
+
+        return Processed(p, images, p.seed, info)
+
+    def run_linear(self, p:StableDiffusionProcessing) -> Tuple[List[PILImage], str]:
+        global from_hint_cond, to_hint_cond, from_control_tensors, to_control_tensors, interp_alpha, interp_ip
 
         images = []
         info = None
@@ -666,62 +475,122 @@ class Script(scripts.Script):
             if append: images.extend(proc.images)
             else: return proc.images
 
-        try:
-            on_before_image_saved(save_image_hijack)
+        ''' ↓↓↓ rife interp utils ↓↓↓ '''
+        def save_ctrl_cond(idx:int):
+            self.tmp_dp.mkdir(exist_ok=True)
+            for i, x in enumerate(to_hint_cond):
+                if len(x.shape) == 3:
+                    if   x.shape[0] == 1: x = x.squeeze_(0)         # [C=1, H, W] => [H, W]
+                    elif x.shape[0] == 3: x = x.permute([1, 2, 0])  # [C=3, H, W] => [H, W, C]
+                    else: raise ValueError(f'unknown cond shape: {x.shape}')
+                else:
+                    raise ValueError(f'unknown cond shape: {x.shape}')
+                im = (x.detach().clamp(0.0, 1.0).cpu().numpy() * 255).astype(np.uint8)
+                Image.fromarray(im).save(self.tmp_dp / f'{idx}-{i}.png')
+        def rife_interp(i:int, j:int, k:int, alpha:float) -> Tensor:
+            ''' interp between i-th and j-th cond of the k-th ctrlnet set '''
+            fp0 = self.tmp_dp / f'{i}-{k}.png'
+            fp1 = self.tmp_dp / f'{j}-{k}.png'
+            fpo = self.tmp_dp / f'{i}-{j}-{alpha:.3f}.png' if self.dbg_rife else self.tmp_fp
+            assert run_cmd(f'rife-ncnn-vulkan -m rife-v4 -s {alpha} -0 "{fp0}" -1 "{fp1}" -o "{fpo}"')
+            x = torch.from_numpy(np.asarray(Image.open(fpo)) / 255.0)
+            if   len(x.shape) == 2: x = x.unsqueeze_(0)             # [H, W] => [C=1, H, W]
+            elif len(x.shape) == 3: x = x.permute([2, 0, 1])        # [H, W, C] => [C, H, W]
+            else: raise ValueError(f'unknown cond shape: {x.shape}')
+            return x
+        ''' ↑↑↑ rife interp utils ↑↑↑ '''
 
-            global from_hint_cond, to_hint_cond, from_control_tensors, to_control_tensors, interp_alpha, interp_ip
-            from_hint_cond      .clear()
-            to_hint_cond        .clear()
-            from_control_tensors.clear()
-            to_control_tensors  .clear()
+        ''' ↓↓↓ filename reorder utils ↓↓↓ '''
+        iframe = 0
+        def rename_image_filename(idx:int, param: ImageSaveParams):
+            fn = param.filename
+            stem, suffix = os.path.splitext(os.path.basename(fn))
+            param.filename = os.path.join(os.path.dirname(fn), f'{idx:05d}' + suffix)
+        class save_image_hijack:
+            def __init__(self, callback_fn, idx):
+                self.callback_fn = lambda *args, **kwargs: callback_fn(idx, *args, **kwargs)
+            def __enter__(self):
+                on_before_image_saved(self.callback_fn)
+            def __exit__(self, exc_type, exc_value, exc_traceback):
+                remove_callbacks_for_function(self.callback_fn)
 
-            # Step 1: draw the init image
-            setattr(p, 'init_images', [Image.open(self.ctrlnet_ref_fps[0])])
-            interp_alpha = 0.0
+        ''' ↑↑↑ filename reorder utils ↑↑↑ '''
+
+        # Step 1: draw the init image
+        setattr(p, 'init_images', [Image.open(self.ctrlnet_ref_fps[0])])
+        interp_alpha = 0.0
+        with save_image_hijack(rename_image_filename, 0):
             gen_image()
+            iframe += 1
+        save_ctrl_cond(0)
 
-            # travel through stages
-            for i in range(1, n_stages):
-                if state.interrupted: raise StopIteration
+        # travel through stages
+        for i in range(1, self.n_stages):
+            if state.interrupted: break
 
-                # Setp 3: move to next stage
-                from_control_tensors = [t for t in to_control_tensors] ; to_control_tensors.clear()
-                from_hint_cond       = [t for t in to_hint_cond]       ; to_hint_cond      .clear()
-                setattr(p, 'init_images', [Image.open(self.ctrlnet_ref_fps[i])])
-                interp_alpha = 0.0
+            # Setp 3: move to next stage
+            from_hint_cond       = [t for t in to_hint_cond]       ; to_hint_cond      .clear()
+            from_control_tensors = [t for t in to_control_tensors] ; to_control_tensors.clear()
+            setattr(p, 'init_images', [Image.open(self.ctrlnet_ref_fps[i])])
+            interp_alpha = 0.0
+
+            with save_image_hijack(rename_image_filename, iframe + self.steps[i]):
                 cached_images = gen_image(append=False)
+            save_ctrl_cond(i)
 
-                # Step 2: draw the interpolated images
-                n_inter = steps[i] + 1
-                for t in range(1, n_inter):
-                    if state.interrupted: raise StopIteration
+            # Step 2: draw the interpolated images
+            is_interrupted = False
+            n_inter = self.steps[i] + 1
+            for t in range(1, n_inter):
+                if state.interrupted: is_interrupted = True ; break
 
-                    mid_hint_cond.clear()
-                    device = devices.get_device_for("controlnet")
+                interp_alpha = t / n_inter     # [1/T, 2/T, .. T-1/T]
+
+                mid_hint_cond.clear()
+                device = devices.get_device_for("controlnet")
+                if self.interp_meth == InterpMethod.LINEAR:
                     for hintA, hintB in zip(from_hint_cond, to_hint_cond):
-                        hintC = interp_fn(hintA.to(device), hintB.to(device), interp_alpha)
-                        #print('  hint diff:', (hintC - param.hint_cond).abs().mean().item())
+                        hintC = weighted_sum(hintA.to(device), hintB.to(device), interp_alpha)
                         mid_hint_cond.append(hintC)
+                elif self.interp_meth == InterpMethod.RIFE:
+                    dtype = to_hint_cond[0].dtype
+                    for k in range(len(to_hint_cond)):
+                        hintC = rife_interp(i-1, i, k, interp_alpha).to(device, dtype)
+                        mid_hint_cond.append(hintC)
+                else: raise ValueError(f'unknown interp_meth: {self.interp_meth}')
 
-                    interp_alpha = t / n_inter     # [1/T, 2/T, .. T-1/T]
-                    interp_ip = 0
+                interp_ip = 0
+                with save_image_hijack(rename_image_filename, iframe):
                     gen_image()
+                    iframe += 1
 
-                # adjust order
-                images.extend(cached_images)
+            # adjust order
+            images.extend(cached_images)
+            iframe += 1
 
-        except StopIteration: pass
-        finally:
-            remove_callbacks_for_function(save_image_hijack)
+            if is_interrupted: break
 
-            from_hint_cond      .clear()
-            to_hint_cond        .clear()
-            from_control_tensors.clear()
-            to_control_tensors  .clear()
-            devices.torch_gc()
-            gc.collect()
+        return images, info
 
-        # Save video
-        if ext_video: save_video(images, video_slice, video_pad, video_fps, video_fmt, os.path.join(self.log_dp, f'travel-{travel_number:05}'))
+    def process_batch(self, p:StableDiffusionProcessing, *args, **kwargs):
+        ''' hijack over ControlNet's hijack, controlnet hooks `process()` so we have to hijack after it :) '''
 
-        return Processed(p, images, p.seed, info)
+        unethook: UnetHook = self.controlnet_script.latest_network
+        assert unethook, 'Error: UnetHook is None! You silly forgot to enable or set up ControlNet?'
+        unet: UNetModel = p.sd_model.model.diffusion_model
+        assert unet._original_forward,  'Error: Unet did not hook on? You silly forgot to enable or set up ControlNet?'
+        control_params: List[ControlParams] = unethook.control_params
+        assert control_params, 'Error: ControlParams is None! You silly forgot to enable or set up ControlNet?'
+        
+        self.saved_unet_forward = unet._original_forward
+        unet.forward = lambda *args, **kwargs: forward2(unethook, *args, **kwargs)
+        self.hooked = True
+        setattr(p, 'detected_map', None)
+
+    def postprocess_batch(self, p:StableDiffusionProcessing, *args, **kwargs):
+        if not self.hooked: return
+
+        unet: UNetModel = p.sd_model.model.diffusion_model
+        unet.forward = self.saved_unet_forward
+        self.hooked = False
+        setattr(p, 'detected_map', None)

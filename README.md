@@ -17,6 +17,7 @@
 ![:stable-diffusion-webui-prompt-travel](https://count.getloli.com/get/@:stable-diffusion-webui-prompt-travel)
 
 Try interpolating on the hidden vectors of conditioning prompt to make seemingly-continuous image sequence, or let's say a pseudo-animation. 😀  
+Not only prompts! We also support non-prompt conditions, read => [README_ext.md](README_ext.md) ~  
 
 ⚠ 我们成立了插件反馈 QQ 群: 616795645 (赤狐屿)，欢迎出建议、意见、报告bug等 (w  
 ⚠ We have a QQ chat group (616795645) now, any suggestions, discussions and bug reports are highly wellllcome!!  
@@ -29,6 +30,7 @@ Try interpolating on the hidden vectors of conditioning prompt to make seemingly
 
 ⚪ Features
 
+- 2023/04/13: `v2.7` add RIFE to controlnet-travel, skip fusion (experimental)
 - 2023/03/31: `v2.6` add a tkinter [GUI](#run-each-time) for postprocess toolchain
 - 2023/03/30: `v2.5` add controlnet-travel script (experimental), interpolating between hint conditions **instead of prompts**, thx for the code base from [sd-webui-controlnet](https://github.com/Mikubill/sd-webui-controlnet) 
 - 2023/02/14: `v2.3` integrate basic function of [depth-image-io](https://github.com/AnonymousCervine/depth-image-io-for-SDWebui) for depth2img models
