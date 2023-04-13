@@ -25,7 +25,7 @@ Options:
   - `rife`: optical flow model (requires to install postprocess tools first), better for edge-base annotaions like `canny`, `openpose`
 - skip_latent_fusion: (list of bool), experimental
   - skip some latent layers fusion for saving memory, but might get wierd results 🤔
-  - ℹ the `mid` and `out` blocks are safe to skip in my experiences
+  - ℹ in my experiences, the `mid` and `in` blocks are more safe to skip
 - save_rife: (bool), save the rife interpolated condtion images
 
 
