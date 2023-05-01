@@ -25,6 +25,9 @@ Not only prompts! We also support non-prompt conditions, read => [README_ext.md]
 ℹ 实话不说，我想有可能通过这个来做ppt童话绘本<del>甚至本子</del>……  
 ℹ 聪明的用法：先手工盲搜两张好看的图 (只有prompt差异)，然后再尝试在其间 travel :lolipop:  
 
+⚠ Remeber to check "Always save all generated images" on in the settings tab, otherwise upscaling and saving intermediate images would not work.
+⚠ 记得在设置页勾选 “总是保存所有生成的图片”，否则 上采样 与 保存中间图片 将无法工作。
+
 
 ### Change Log
 
