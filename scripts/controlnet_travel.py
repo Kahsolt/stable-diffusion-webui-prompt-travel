@@ -493,7 +493,7 @@ class Script(scripts.Script):
             fp0 = self.tmp_dp / f'{i}-{k}.png'
             fp1 = self.tmp_dp / f'{j}-{k}.png'
             fpo = self.tmp_dp / f'{i}-{j}-{alpha:.3f}.png' if self.dbg_rife else self.tmp_fp
-            assert run_cmd(f'rife-ncnn-vulkan -m rife-v4 -s {alpha} -0 "{fp0}" -1 "{fp1}" -o "{fpo}"')
+            assert run_cmd(f'rife-ncnn-vulkan -m rife-v4 -s {alpha:.3f} -0 "{fp0}" -1 "{fp1}" -o "{fpo}"')
             x = torch.from_numpy(np.asarray(Image.open(fpo)) / 255.0)
             if   len(x.shape) == 2: x = x.unsqueeze_(0)             # [H, W] => [C=1, H, W]
             elif len(x.shape) == 3: x = x.permute([2, 0, 1])        # [H, W, C] => [C, H, W]
