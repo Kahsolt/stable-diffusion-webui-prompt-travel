@@ -923,8 +923,8 @@ class Script(scripts.Script):
                 imgs = gen_image(inter_pos_hidden, neg_hidden, prompts, seeds, subseeds)
                 images.extend(imgs)
 
-        self.extra_networks_deactivate(from_extra_network_data)
-        self.extra_networks_deactivate(to_extra_network_data)
+        self.extra_networks_deactivate(p, from_extra_network_data)
+        self.extra_networks_deactivate(p, to_extra_network_data)
         return images, initial_info
 
     def run_replace(self, p: StableDiffusionProcessing) -> Tuple[List[PILImage], str]:
@@ -1014,10 +1014,10 @@ class Script(scripts.Script):
             
             # move to next stage
             from_pos_hidden = to_pos_hidden
-            self.extra_networks_deactivate(from_extra_network_data)
+            self.extra_networks_deactivate(p, from_extra_network_data)
             from_extra_network_data = to_extra_network_data
 
-        self.extra_networks_deactivate(from_extra_network_data)
+        self.extra_networks_deactivate(p, from_extra_network_data)
         return images, initial_info
 
     ''' ↓↓↓ helpers ↓↓↓ '''
