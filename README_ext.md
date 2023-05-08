@@ -29,6 +29,16 @@ Options:
 - save_rife: (bool), save the rife interpolated condtion images
 
 
+### UNet-Travel
+
+Compared with the naive batch img2img, unet-travel synchronizes the latent frames in the UNet model to smooth the video.
+
+Quick start instructions:
+
+- prepare a folder of images, might be frames from a video
+- find `UNet Travel` in the script dropdown, set all parameters as you want, specify your image folder path here
+- click Generate button
+
 ----
 by Armit
 2023/04/12
