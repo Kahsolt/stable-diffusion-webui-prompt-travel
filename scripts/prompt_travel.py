@@ -1,10 +1,16 @@
+# This extension works with [https://github.com/AUTOMATIC1111/stable-diffusion-webui](https://github.com/AUTOMATIC1111/stable-diffusion-webui)
+# version: v1.4.0
+
+LOG_PREFIX = '[Prompt-Travel]'
+
 import os
-from enum import Enum
 from pathlib import Path
-from copy import deepcopy
 from PIL.Image import Image as PILImage
-from typing import List, Tuple, Union, Callable, Optional
-from traceback import print_exc
+from enum import Enum
+from dataclasses import dataclass
+from functools import partial
+from typing import List, Tuple, Callable, Any, Optional, Generic, TypeVar
+from traceback import print_exc, format_exc
 
 import gradio as gr
 import numpy as np
@@ -15,14 +21,14 @@ try:
     from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
     from moviepy.editor import concatenate_videoclips, ImageClip
 except ImportError:
-    print('package moviepy not installed, will not be able to generate video')
+    print(f'{LOG_PREFIX} package moviepy not installed, will not be able to generate video')
 
 import modules.scripts as scripts
-from modules.script_callbacks import on_before_image_saved, ImageSaveParams, on_cfg_denoiser, CFGDenoiserParams, on_cfg_denoised, CFGDenoisedParams, remove_callbacks_for_function
+from modules.script_callbacks import on_before_image_saved, ImageSaveParams, on_cfg_denoiser, CFGDenoiserParams, remove_callbacks_for_function
 from modules.ui import gr_show
 from modules.shared import state, opts, sd_upscalers
-from modules.prompt_parser import ScheduledPromptConditioning, MulticondLearnedConditioning
-from modules.processing import Processed, StableDiffusionProcessing, StableDiffusionProcessingTxt2Img, StableDiffusionProcessingImg2Img, get_fixed_seed
+from modules.processing import process_images, get_fixed_seed
+from modules.processing import Processed, StableDiffusionProcessing as Processing, StableDiffusionProcessingTxt2Img as ProcessingTxt2Img, StableDiffusionProcessingImg2Img as ProcessingImg2Img
 from modules.images import resize_image
 from modules.sd_samplers_common import single_sample_to_image
 
@@ -54,7 +60,17 @@ class VideoFormat(Enum):
     GIF  = 'gif'
     WEBM = 'webm'
 
-if 'global consts':
+if 'typing':
+    T = TypeVar('T')
+    @dataclass
+    class Ref(Generic[T]): value: T = None
+
+    TensorRef = Ref[Tensor]
+    StrRef = Ref[str]
+    PILImages = List[PILImage]
+    RunResults = Tuple[PILImages, str]
+
+if 'consts':
     __ = lambda key, value=None: opts.data.get(f'customscript/prompt_travel.py/txt2img/{key}/value', value)
 
     LABEL_MODE              = 'Travel mode'
@@ -109,298 +125,25 @@ if 'global consts':
     EPS = 1e-6
 
 
-# ↓↓↓ the following is modified from 'modules/processing.py' ↓↓↓
-
-from modules.processing import *
-
-def process_images_before(p: StableDiffusionProcessing):
-    stored_opts = {k: opts.data[k] for k in p.override_settings.keys()}
-
-    try:
-        for k, v in p.override_settings.items():
-            setattr(opts, k, v)
-            if k == 'sd_model_checkpoint':
-                sd_models.reload_model_weights()
-            if k == 'sd_vae':
-                sd_vae.reload_vae_weights()
-    except:
-        pass
-
-    return stored_opts
-
-def process_images_after(p: StableDiffusionProcessing, stored_opts:Dict):
-    # restore opts to original state
-    if p.override_settings_restore_afterwards:
-        for k, v in stored_opts.items():
-            setattr(opts, k, v)
-            if k == 'sd_model_checkpoint':
-                sd_models.reload_model_weights()
-            if k == 'sd_vae':
-                sd_vae.reload_vae_weights()
-
-def process_images_prompt_to_cond(p: StableDiffusionProcessing) -> tuple:
-    ''' call once per stage '''
-    
-    if type(p.prompt) == list:
-        assert(len(p.prompt) > 0)
-    else:
-        assert p.prompt is not None
-
-    devices.torch_gc()
-
-    seed    = p.seed
-    subseed = p.subseed
-
-    modules.sd_hijack.model_hijack.apply_circular(p.tiling)
-    modules.sd_hijack.model_hijack.clear_comments()
-
-    if type(p.prompt) == list:
-        p.all_prompts = [shared.prompt_styles.apply_styles_to_prompt(x, p.styles) for x in p.prompt]
-    else:
-        p.all_prompts = p.batch_size * p.n_iter * [shared.prompt_styles.apply_styles_to_prompt(p.prompt, p.styles)]
-
-    if type(p.negative_prompt) == list:
-        p.all_negative_prompts = [shared.prompt_styles.apply_negative_styles_to_prompt(x, p.styles) for x in p.negative_prompt]
-    else:
-        p.all_negative_prompts = p.batch_size * p.n_iter * [shared.prompt_styles.apply_negative_styles_to_prompt(p.negative_prompt, p.styles)]
-
-    if type(seed) == list:
-        p.all_seeds = seed
-    else:
-        p.all_seeds = [int(seed) + (x if p.subseed_strength == 0 else 0) for x in range(len(p.all_prompts))]
-
-    if type(subseed) == list:
-        p.all_subseeds = subseed
-    else:
-        p.all_subseeds = [int(subseed) + x for x in range(len(p.all_prompts))]
-
-    if os.path.exists(cmd_opts.embeddings_dir) and not p.do_not_reload_embeddings:
-        model_hijack.embedding_db.load_textual_inversion_embeddings()
-
-    cached_uc = [None, None]
-    cached_c = [None, None]
-
-    def get_conds_with_caching(function, required_prompts, steps, cache):
-        """
-        Returns the result of calling function(shared.sd_model, required_prompts, steps)
-        using a cache to store the result if the same arguments have been used before.
-
-        cache is an array containing two elements. The first element is a tuple
-        representing the previously used arguments, or None if no arguments
-        have been used before. The second element is where the previously
-        computed result is stored.
-        """
-
-        if cache[0] is not None and (required_prompts, steps) == cache[0]:
-            return cache[1]
-
-        with devices.autocast():
-            cache[1] = function(shared.sd_model, required_prompts, steps)
-
-        cache[0] = (required_prompts, steps)
-        return cache[1]
-
-    with torch.no_grad(), p.sd_model.ema_scope():
-        with devices.autocast():
-            p.init(p.all_prompts, p.all_seeds, p.all_subseeds)
-
-            # for OSX, loading the model during sampling changes the generated picture, so it is loaded here
-            if shared.opts.live_previews_enable and opts.show_progress_type == "Approx NN":
-                sd_vae_approx.model()
-
-        p.iteration = n = 0
-        prompts = p.all_prompts[n * p.batch_size:(n + 1) * p.batch_size]
-        negative_prompts = p.all_negative_prompts[n * p.batch_size:(n + 1) * p.batch_size]
-        seeds = p.all_seeds[n * p.batch_size:(n + 1) * p.batch_size]
-        subseeds = p.all_subseeds[n * p.batch_size:(n + 1) * p.batch_size]
-
-        if p.scripts is not None and hasattr(p, 'before_process_batch'):
-            p.scripts.before_process_batch(p, batch_number=n, prompts=prompts, seeds=seeds, subseeds=subseeds)
-
-        if len(prompts) == 0:
-            return
-
-        prompts, extra_network_data = extra_networks.parse_prompts(prompts)
-
-        if not p.disable_extra_networks:
-            with devices.autocast():
-                extra_networks.activate(p, extra_network_data)
-
-        if p.scripts is not None:
-            p.scripts.process_batch(p, batch_number=n, prompts=prompts, seeds=seeds, subseeds=subseeds)
-
-        # params.txt should be saved after scripts.process_batch, since the
-        # infotext could be modified by that callback
-        # Example: a wildcard processed by process_batch sets an extra model
-        # strength, which is saved as "Model Strength: 1.0" in the infotext
-        if n == 0:
-            with open(os.path.join(paths.data_path, "params.txt"), "w", encoding="utf8") as file:
-                processed = Processed(p, [], p.seed, "")
-                file.write(processed.infotext(p, 0))
-
-        with devices.autocast():
-            # 'prompt string' => tensor([T, D])
-            uc = get_conds_with_caching(prompt_parser.get_learned_conditioning, negative_prompts, p.steps, cached_uc)
-            c = get_conds_with_caching(prompt_parser.get_multicond_learned_conditioning, prompts, p.steps, cached_c)
-
-        return c, uc, prompts, seeds, subseeds, extra_network_data
-
-def process_images_cond_to_image(p: StableDiffusionProcessing, c, uc, prompts, seeds, subseeds) -> Processed:
-    ''' call `travel steps` times per stage '''
-
-    comments = {}
-    infotexts = []
-    output_images = []
-
-    def infotext(iteration=0, position_in_batch=0):
-        return create_infotext(p, p.all_prompts, p.all_seeds, p.all_subseeds, comments, iteration, position_in_batch)
-
-    if len(model_hijack.comments) > 0:
-        for comment in model_hijack.comments:
-            comments[comment] = 1
-    
-    with torch.no_grad(), p.sd_model.ema_scope():
-        with devices.without_autocast() if devices.unet_needs_upcast else devices.autocast():
-            samples_ddim = p.sample(conditioning=c, unconditional_conditioning=uc, seeds=seeds, subseeds=subseeds, subseed_strength=p.subseed_strength, prompts=prompts)
-
-        # [B=1, C=4, H=64,  W=64] => [B=1, C=3, H=512, W=512]
-        x_samples_ddim = [decode_first_stage(p.sd_model, samples_ddim[i:i+1].to(dtype=devices.dtype_vae))[0].cpu() for i in range(samples_ddim.size(0))]
-        for x in x_samples_ddim: devices.test_for_nans(x, "vae")
-        x_samples_ddim = torch.stack(x_samples_ddim).float()
-        x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
-        del samples_ddim
-
-        if shared.cmd_opts.lowvram or shared.cmd_opts.medvram:
-            lowvram.send_everything_to_cpu()
-        devices.torch_gc()
-
-        n = 0       # batch count for legacy compatible
-        if p.scripts is not None:
-            p.scripts.postprocess_batch(p, x_samples_ddim, batch_number=n)
-
-        for i, x_sample in enumerate(x_samples_ddim):
-            x_sample = 255. * np.moveaxis(x_sample.cpu().numpy(), 0, 2)
-            x_sample = x_sample.astype(np.uint8)
-
-            if p.restore_faces:
-                if opts.save and not p.do_not_save_samples and opts.save_images_before_face_restoration:
-                    images.save_image(Image.fromarray(x_sample), p.outpath_samples, "", seeds[i], prompts[i], opts.samples_format, info=infotext(n, i), p=p, suffix="-before-face-restoration")
-
-                devices.torch_gc()
-
-                x_sample = modules.face_restoration.restore_faces(x_sample)
-                devices.torch_gc()
-
-            image = Image.fromarray(x_sample)
-
-            if p.scripts is not None:
-                pp = scripts.PostprocessImageArgs(image)
-                p.scripts.postprocess_image(p, pp)
-                image = pp.image
-
-            if p.color_corrections is not None and i < len(p.color_corrections):
-                if opts.save and not p.do_not_save_samples and opts.save_images_before_color_correction:
-                    image_without_cc = apply_overlay(image, p.paste_to, i, p.overlay_images)
-                    images.save_image(image_without_cc, p.outpath_samples, "", seeds[i], prompts[i], opts.samples_format, info=infotext(n, i), p=p, suffix="-before-color-correction")
-                image = apply_color_correction(p.color_corrections[i], image)
-
-            image = apply_overlay(image, p.paste_to, i, p.overlay_images)
-
-            if opts.samples_save and not p.do_not_save_samples:
-                images.save_image(image, p.outpath_samples, "", seeds[i], prompts[i], opts.samples_format, info=infotext(n, i), p=p)
-
-            text = infotext(n, i)
-            infotexts.append(text)
-            if opts.enable_pnginfo:
-                image.info["parameters"] = text
-            output_images.append(image)
-
-            if hasattr(p, 'mask_for_overlay') and p.mask_for_overlay:
-                image_mask = p.mask_for_overlay.convert('RGB')
-                image_mask_composite = Image.composite(image.convert('RGBA').convert('RGBa'), Image.new('RGBa', image.size), p.mask_for_overlay.convert('L')).convert('RGBA')
-
-                if opts.save_mask:
-                    images.save_image(image_mask, p.outpath_samples, "", seeds[i], prompts[i], opts.samples_format, info=infotext(n, i), p=p, suffix="-mask")
-
-                if opts.save_mask_composite:
-                    images.save_image(image_mask_composite, p.outpath_samples, "", seeds[i], prompts[i], opts.samples_format, info=infotext(n, i), p=p, suffix="-mask-composite")
-
-                if opts.return_mask:
-                    output_images.append(image_mask)
-                
-                if opts.return_mask_composite:
-                    output_images.append(image_mask_composite)
-
-        del x_samples_ddim 
-        devices.torch_gc()
-
-        state.nextjob()
-
-    p.color_corrections = None
-    index_of_first_image = 0
-
-    devices.torch_gc()
-
-    return Processed(p, output_images, p.all_seeds[0], infotext(), comments="".join(["\n\n" + x for x in comments]), subseed=p.all_subseeds[0], index_of_first_image=index_of_first_image, infotexts=infotexts)
-
-# ↑↑↑ the above is modified from 'modules/processing.py' ↑↑↑
-
-
-Conditioning = Union[ScheduledPromptConditioning, MulticondLearnedConditioning]
-
-def cond_get(X:Conditioning) -> Tensor:
-    def spc_get_cond(c:List[List[ScheduledPromptConditioning]]) -> Tensor:
-        return c[0][0].cond
-    
-    def mlc_get_cond(c:MulticondLearnedConditioning) -> Tensor:
-        return c.batch[0][0].schedules[0].cond      # [B=1, T=77, D=768]
-
-    return mlc_get_cond(X) if isinstance(X, MulticondLearnedConditioning) else spc_get_cond(X)
-
-def cond_replace(X:Conditioning, condX:Tensor) -> Conditioning:
-    def spc_replace_cond(c:List[List[ScheduledPromptConditioning]], cond: Tensor) -> ScheduledPromptConditioning:
-        r = deepcopy(c)
-        spc = r[0][0]
-        r[0][0] = ScheduledPromptConditioning(spc.end_at_step, cond=cond)
-        return r
-
-    def mlc_replace_cond(c:MulticondLearnedConditioning, cond: Tensor) -> MulticondLearnedConditioning:
-        r = deepcopy(c)
-        spc = r.batch[0][0].schedules[0]
-        r.batch[0][0].schedules[0] = ScheduledPromptConditioning(spc.end_at_step, cond=cond)
-        return r
-
-    return mlc_replace_cond(X, condX) if isinstance(X, MulticondLearnedConditioning) else spc_replace_cond(X, condX)
-
 def cond_align(condA:Tensor, condB:Tensor) -> Tuple[Tensor, Tensor]:
     d = condA.shape[0] - condB.shape[0]
     if   d < 0: condA = F.pad(condA, (0, 0, 0, -d))
     elif d > 0: condB = F.pad(condB, (0, 0, 0,  d))
     return condA, condB
-    
-def wrap_get_align_replace(fn:Callable[..., Tensor]):
-    def wrapper(A:Conditioning, B:Conditioning, *args, **kwargs) -> Conditioning:
-        condA = cond_get(A)
-        condB = cond_get(B)
+
+def wrap_cond_align(fn:Callable[..., Tensor]):
+    def wrapper(condA:Tensor, condB:Tensor, *args, **kwargs) -> Tensor:
         condA, condB = cond_align(condA, condB)
-        condC = fn(condA, condB, *args, **kwargs)
-        C = cond_replace(A, condC)
-        return C
+        return fn(condA, condB, *args, **kwargs)
     return wrapper
 
-@wrap_get_align_replace
-def weighted_sum_cond(condA:Tensor, condB:Tensor, alpha:float) -> Tensor:
-    return weighted_sum(condA, condB, alpha)
-
+@wrap_cond_align
 def weighted_sum(condA:Tensor, condB:Tensor, alpha:float) -> Tensor:
     ''' linear interpolate on latent space of condition '''
 
     return (1 - alpha) * condA + (alpha) * condB
 
-@wrap_get_align_replace
-def geometric_slerp_cond(condA:Tensor, condB:Tensor, alpha:float) -> Tensor:
-    return geometric_slerp(condA, condB, alpha)
-
+@wrap_cond_align
 def geometric_slerp(condA:Tensor, condB:Tensor, alpha:float) -> Tensor:
     ''' spherical linear interpolation on latent space of condition, ref: https://en.wikipedia.org/wiki/Slerp '''
 
@@ -413,15 +156,15 @@ def geometric_slerp(condA:Tensor, condB:Tensor, alpha:float) -> Tensor:
 
     slerp = (torch.sin((1 - alpha) * omega) / so) * condA + (torch.sin(alpha * omega) / so) * condB
 
-    mask = dot > 0.9995                             # [T=77, D=1]
-    if not any(mask):
+    mask: Tensor = dot > 0.9995                     # [T=77, D=1]
+    if not mask.any():
         return slerp
     else:
         lerp = (1 - alpha) * condA + (alpha) * condB
-        return torch.where(mask, lerp, slerp)           # use simple lerp when angle very close to avoid NaN
+        return torch.where(mask, lerp, slerp)       # use simple lerp when angle very close to avoid NaN
 
-@wrap_get_align_replace
-def replace_until_match_cond(condA:Tensor, condB:Tensor, count:int, dist:Tensor, order:str=ModeReplaceOrder.RANDOM) -> Tensor:
+@wrap_cond_align
+def replace_until_match(condA:Tensor, condB:Tensor, count:int, dist:Tensor, order:str=ModeReplaceOrder.RANDOM) -> Tensor:
     ''' value substite on condition tensor; will inplace modify `dist` '''
 
     def index_tensor_to_tuple(index:Tensor) -> Tuple[Tensor, ...]:
@@ -442,7 +185,7 @@ def replace_until_match_cond(condA:Tensor, condB:Tensor, count:int, dist:Tensor,
             sorted_index = val_diff.argsort()
         elif order == ModeReplaceOrder.DIFFERENT:
             sorted_index = val_diff.argsort(descending=True)
-        else: raise ValueError(f'unkown replace_order: {order}')
+        else: raise ValueError(f'unknown replace_order: {order}')
 
         sel = sorted_index[:count]
 
@@ -474,13 +217,13 @@ def get_next_sequence_number(path:str) -> int:
             pass
     return result + 1
 
-def update_img2img_p(p:StableDiffusionProcessing, imgs:List[PILImage], denoising_strength:float=0.75) -> StableDiffusionProcessingImg2Img:
-    if isinstance(p, StableDiffusionProcessingImg2Img):
+def update_img2img_p(p:Processing, imgs:PILImages, denoising_strength:float=0.75) -> ProcessingImg2Img:
+    if isinstance(p, ProcessingImg2Img):
         p.init_images = imgs
         p.denoising_strength = denoising_strength
         return p
 
-    if isinstance(p, StableDiffusionProcessingTxt2Img):
+    if isinstance(p, ProcessingTxt2Img):
         KNOWN_KEYS = [      # see `StableDiffusionProcessing.__init__()`
             'sd_model',
             'outpath_samples',
@@ -511,15 +254,18 @@ def update_img2img_p(p:StableDiffusionProcessing, imgs:List[PILImage], denoising
             'do_not_reload_embeddings',
             #'denoising_strength',
             'ddim_discretize',
+            's_min_uncond',
             's_churn',
             's_tmax',
             's_tmin',
             's_noise',
             'override_settings',
+            'override_settings_restore_afterwards',
             'sampler_index',
+            'script_args',
         ]
         kwargs = { k: getattr(p, k) for k in dir(p) if k in KNOWN_KEYS }    # inherit params
-        return StableDiffusionProcessingImg2Img(
+        return ProcessingImg2Img(
             init_images=imgs,
             denoising_strength=denoising_strength,
             **kwargs,
@@ -563,16 +309,16 @@ def upscale_image(img:PILImage, width:int, height:int, upscale_meth:str, upscale
         img = resize_image(0, img, tgt_w, tgt_h, upscaler_name=upscale_meth)
     return img
 
-def save_video(images:List[PILImage], video_slice:slice, video_pad:int, video_fps:float, video_fmt:VideoFormat, fbase:str):
-    if len(images) <= 1 or 'ImageSequenceClip' not in globals(): return
+def save_video(imgs:PILImages, video_slice:slice, video_pad:int, video_fps:float, video_fmt:VideoFormat, fbase:str):
+    if len(imgs) <= 1 or 'ImageSequenceClip' not in globals(): return
 
     try:
         # arrange frames
-        if video_slice:   images = images[video_slice]
-        if video_pad > 0: images = [images[0]] * video_pad + images + [images[-1]] * video_pad
+        if video_slice:   imgs = imgs[video_slice]
+        if video_pad > 0: imgs = [imgs[0]] * video_pad + imgs + [imgs[-1]] * video_pad
 
         # export video
-        seq: List[np.ndarray] = [np.asarray(img) for img in images]
+        seq: List[np.ndarray] = [np.asarray(img) for img in imgs]
         try:
             clip = ImageSequenceClip(seq, fps=video_fps)
         except:     # images may have different size (small probability due to upscaler)
@@ -584,13 +330,90 @@ def save_video(images:List[PILImage], video_slice:slice, video_pad:int, video_fp
     except: print_exc()
 
 
+class on_cfg_denoiser_wrapper:
+    def __init__(self, callback_fn:Callable):
+        self.callback_fn = callback_fn
+    def __enter__(self):
+        on_cfg_denoiser(self.callback_fn)
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        remove_callbacks_for_function(self.callback_fn)
+
+class p_steps_overrider:
+    def __init__(self, p:Processing, steps:int=1):
+        self.p = p
+        self.steps = steps
+        self.steps_saved = self.p.steps
+    def __enter__(self):
+        self.p.steps = self.steps
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        self.p.steps = self.steps_saved
+
+class p_save_samples_overrider:
+    def __init__(self, p:Processing, save:bool=True):
+        self.p = p
+        self.save = save
+        self.do_not_save_samples_saved = self.p.do_not_save_samples
+    def __enter__(self):
+        self.p.do_not_save_samples = not self.save
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        self.p.do_not_save_samples = self.do_not_save_samples_saved
+
+def get_cond_callback(refs:List[TensorRef], params:CFGDenoiserParams):
+    if params.sampling_step > 0: return
+    values = [
+        params.text_cond,        # [B=1, L= 77, D=768]
+        params.text_uncond,      # [B=1, L=231, D=768]
+    ]
+    for i, ref in enumerate(refs):
+        ref.value = values[i]
+
+def set_cond_callback(refs:List[TensorRef], params:CFGDenoiserParams):
+    values = [
+        params.text_cond,        # [B=1, L= 77, D=768]
+        params.text_uncond,      # [B=1, L=231, D=768]
+    ]
+    for i, ref in enumerate(refs):
+        values[i].data = ref.value
+
+def get_latent_callback(ref:TensorRef, embryo_step:int, params:CFGDenoiserParams):
+    if params.sampling_step != embryo_step: return
+    ref.value = params.x
+
+def set_latent_callback(ref:TensorRef, embryo_step:int, params:CFGDenoiserParams):
+    if params.sampling_step != embryo_step: return
+    params.x.data = ref.value
+
+
+def switch_to_stage_binding_(self:'Script', i:int):
+    if 'show_debug':
+        print(f'[stage {i+1}/{self.n_stages}]')
+        print(f'  pos prompt: {self.pos_prompts[i]}')
+        if hasattr(self, 'neg_prompts'):
+            print(f'  neg prompt: {self.neg_prompts[i]}')
+    self.p.prompt = self.pos_prompts[i]
+    if hasattr(self, 'neg_prompts'):
+        self.p.negative_prompt = self.neg_prompts[i]
+    self.p.subseed = self.subseed
+
+def process_p_binding_(self:'Script', append:bool=True, save:bool=True) -> PILImages:
+    assert hasattr(self, 'images') and hasattr(self, 'info'), 'unknown logic, "images" and "info" not initialized'
+    with p_save_samples_overrider(self.p, save):
+        proc = process_images(self.p)
+    if save:
+        if not self.info.value: self.info.value = proc.info
+        if append: self.images.extend(proc.images)
+        if self.genesis == Gensis.SUCCESSIVE:
+            self.p = update_img2img_p(self.p, self.images[-1:], self.denoise_w)
+        return proc.images
+
+
 class Script(scripts.Script):
 
     def title(self):
         return 'Prompt Travel'
 
     def describe(self):
-        return 'Travel from one prompt to another in the latent space.'
+        return 'Travel from one prompt to another in the text encoder latent space.'
 
     def show(self, is_img2img):
         return True
@@ -615,8 +438,8 @@ class Script(scripts.Script):
             embryo_step = gr.Text    (label=LABEL_EMBRYO_STEP, value=lambda: DEFAULT_EMBRYO_STEP, max_lines=1, visible=False)
 
             def switch_genesis(genesis:str):
-                show_dw = Gensis(genesis) == Gensis.SUCCESSIVE    # 'successive' genesis
-                show_es = Gensis(genesis) == Gensis.EMBRYO        # 'embryo' genesis
+                show_dw = Gensis(genesis) == Gensis.SUCCESSIVE    # show 'denoise_w' for 'successive'
+                show_es = Gensis(genesis) == Gensis.EMBRYO        # show 'embryo_step' for 'embryo'
                 return [gr_show(x) for x in [show_dw, show_es]]
             genesis.change(switch_genesis, inputs=[genesis], outputs=[denoise_w, embryo_step], show_progress=False)
 
@@ -640,24 +463,27 @@ class Script(scripts.Script):
             ext_upscale = gr.Checkbox(label=LABEL_UPSCALE, value=lambda: DEFAULT_UPSCALE) 
             ext_depth   = gr.Checkbox(label=LABEL_DEPTH,   value=lambda: DEFAULT_DEPTH)
         
-            ext_video  .change(fn=lambda x: gr_show(x), inputs=ext_video,   outputs=tab_ext_video,   show_progress=False)
-            ext_upscale.change(fn=lambda x: gr_show(x), inputs=ext_upscale, outputs=tab_ext_upscale, show_progress=False)
-            ext_depth  .change(fn=lambda x: gr_show(x), inputs=ext_depth,   outputs=tab_ext_depth,   show_progress=False)
+            ext_video  .change(gr_show, inputs=ext_video,   outputs=tab_ext_video,   show_progress=False)
+            ext_upscale.change(gr_show, inputs=ext_upscale, outputs=tab_ext_upscale, show_progress=False)
+            ext_depth  .change(gr_show, inputs=ext_depth,   outputs=tab_ext_depth,   show_progress=False)
 
-        return [mode, lerp_meth, replace_dim, replace_order,
-                steps, genesis, denoise_w, embryo_step,
-                depth_img,
-                upscale_meth, upscale_ratio, upscale_width, upscale_height,
-                video_fmt, video_fps, video_pad, video_pick,
-                ext_video, ext_upscale, ext_depth]
+        return [
+            mode, lerp_meth, replace_dim, replace_order,
+            steps, genesis, denoise_w, embryo_step,
+            depth_img,
+            upscale_meth, upscale_ratio, upscale_width, upscale_height,
+            video_fmt, video_fps, video_pad, video_pick,
+            ext_video, ext_upscale, ext_depth,
+        ]
 
-    def run(self, p:StableDiffusionProcessing, 
+    def run(self, p:Processing, 
             mode:str, lerp_meth:str, replace_dim:str, replace_order:str,
             steps:str, genesis:str, denoise_w:float, embryo_step:str,
             depth_img:PILImage,
             upscale_meth:str, upscale_ratio:float, upscale_width:int, upscale_height:int,
             video_fmt:str, video_fps:float, video_pad:int, video_pick:str,
-            ext_video:bool, ext_upscale:bool, ext_depth:bool):
+            ext_video:bool, ext_upscale:bool, ext_depth:bool,
+        ):
         
         # enum lookup
         mode: Mode                      = Mode(mode)
@@ -676,16 +502,15 @@ class Script(scripts.Script):
         if genesis == Gensis.EMBRYO:
             try: x = float(embryo_step)
             except: return Processed(p, [], p.seed, f'embryo_step is not a number: {embryo_step}')
-            if x <= 0: Processed(p, [], p.seed, f'embryo_step must > 0, but got {embryo_step}')
-            embryo_step: int = round(x * p.steps if x < 1.0 else x)
-            del x
+            if x <= 0: return Processed(p, [], p.seed, f'embryo_step must > 0, but got {embryo_step}')
+            embryo_step: int = round(x * p.steps if x < 1.0 else x) ; del x
 
         # Prepare prompts & steps
         prompt_pos = p.prompt.strip()
         if not prompt_pos: return Processed(p, [], p.seed, 'positive prompt should not be empty :(')
         pos_prompts = [p.strip() for p in prompt_pos.split('\n') if p.strip()]
-        if len(pos_prompts) == 1: return Processed(p, [], p.seed, 'should specify at least two lines of prompt to travel between :)')
-        if genesis == Gensis.EMBRYO and len(pos_prompts) > 2: return Processed(p, [], p.seed, 'currently processing with "embryo" genesis exactly takes 2 prompts :(')
+        if len(pos_prompts) == 1: return Processed(p, [], p.seed, 'should specify at least two lines of prompt to travel between :(')
+        if genesis == Gensis.EMBRYO and len(pos_prompts) > 2: return Processed(p, [], p.seed, 'processing with "embryo" genesis takes exactly two lines of prompt :(')
         prompt_neg = p.negative_prompt.strip()
         neg_prompts = [p.strip() for p in prompt_neg.split('\n') if p.strip()]
         if len(neg_prompts) == 0: neg_prompts = ['']
@@ -694,12 +519,11 @@ class Script(scripts.Script):
         while len(neg_prompts) < n_stages: neg_prompts.append(neg_prompts[-1])
 
         try: steps: List[int] = [int(s.strip()) for s in steps.strip().split(',')]
-        except: return Processed(p, [], p.seed, f'cannot parse steps options: {steps}')
+        except: return Processed(p, [], p.seed, f'cannot parse steps option: {steps}')
         if len(steps) == 1:
             steps = [steps[0]] * (n_stages - 1)
         elif len(steps) != n_stages - 1:
-            info = f'stage count mismatch: you have {n_stages} prompt stages, but specified {len(steps)} steps; should assure len(steps) == len(stages) - 1'
-            return Processed(p, [], p.seed, info)
+            return Processed(p, [], p.seed, f'stage count mismatch: you have {n_stages} prompt stages, but specified {len(steps)} steps; should assure len(steps) == len(stages) - 1')
         n_frames = sum(steps) + n_stages
         if 'show_debug':
             print('n_stages:', n_stages)
@@ -714,9 +538,9 @@ class Script(scripts.Script):
         self.log_dp = os.path.join(travel_path, f'{travel_number:05}')
         p.outpath_samples = self.log_dp
         os.makedirs(self.log_dp, exist_ok=True)
-        self.log_fp = os.path.join(self.log_dp, 'log.txt')
+        #self.log_fp = os.path.join(self.log_dp, 'log.txt')
 
-        # Force Batch Count and Batch Size to 1
+        # Force batch count and batch size to 1
         p.n_iter     = 1
         p.batch_size = 1
 
@@ -744,299 +568,219 @@ class Script(scripts.Script):
         self.n_stages      = n_stages
         self.n_frames      = n_frames
 
-        def save_image_hijack(params:ImageSaveParams):
+        def upscale_image_callback(params:ImageSaveParams):
             params.image = upscale_image(params.image, p.width, p.height, upscale_meth, upscale_ratio, upscale_width, upscale_height)
 
-        def cfg_denoiser_hijack(params:CFGDenoiserParams):
-            if not 'show_debug': print('sigma:', params.sigma[-1].item())
-
         # Dispatch
-        runner = getattr(self, f'run_{mode.value}')
-        if not runner: Processed(p, [], p.seed, f'no runner found for mode: {mode.value}')
-
-        stored_opts = {}
-        proc = Processed(p, [], p.seed, '')
+        self.p: Processing = p
+        self.images: PILImages = []
+        self.info: StrRef = Ref()
         try:
+            if ext_upscale: on_before_image_saved(upscale_image_callback)
             if ext_depth: self.ext_depth_preprocess(p, depth_img)
-            if ext_upscale: on_before_image_saved(save_image_hijack)
-            if False: on_cfg_denoiser(cfg_denoiser_hijack)
 
-            stored_opts = process_images_before(p)
-            if p.scripts is not None: p.scripts.process(p)
-            images, info = runner(p)
-            proc = Processed(p, images, p.seed, info)
+            runner = getattr(self, f'run_{mode.value}')
+            if not runner: return Processed(p, [], p.seed, f'no runner found for mode: {mode.value}')
+            runner()
+        except:
+            e = format_exc()
+            print(e)
+            self.info.value = e
         finally:
-            if p.scripts is not None: p.scripts.postprocess(p, proc)
-            process_images_after(p, stored_opts)
-
-            if False: remove_callbacks_for_function(cfg_denoiser_hijack)
-            if ext_upscale: remove_callbacks_for_function(save_image_hijack)
             if ext_depth: self.ext_depth_postprocess(p, depth_img)
+            if ext_upscale: remove_callbacks_for_function(upscale_image_callback)
 
         # Save video
-        if ext_video: save_video(images, video_slice, video_pad, video_fps, video_fmt, os.path.join(self.log_dp, f'travel-{travel_number:05}'))
+        if ext_video: save_video(self.images, video_slice, video_pad, video_fps, video_fmt, os.path.join(self.log_dp, f'travel-{travel_number:05}'))
 
-        return proc
+        return Processed(p, self.images, p.seed, self.info.value)
 
-    def run_linear(self, p: StableDiffusionProcessing) -> Tuple[List[PILImage], str]:
-        lerp_fn     = weighted_sum_cond if self.lerp_meth == LerpMethod.LERP else geometric_slerp_cond
-        genesis     = self.genesis
-        denoise_w   = self.denoise_w
-        pos_prompts = self.pos_prompts
-        neg_prompts = self.neg_prompts
-        steps       = self.steps
-        n_stages    = self.n_stages
-        n_frames    = self.n_frames
+    def run_linear(self):
+        # dispatch for special case
+        if self.genesis == Gensis.EMBRYO: return self.run_linear_embryo()
 
-        if genesis == Gensis.EMBRYO:
-            return self.run_linear_embryo(p)
-        
-        initial_info: str = None
-        images: List[PILImage] = []
+        lerp_fn = weighted_sum if self.lerp_meth == LerpMethod.LERP else geometric_slerp
 
-        def gen_image(pos_hidden, neg_hidden, prompts, seeds, subseeds):
-            nonlocal images, initial_info, p
-            proc = process_images_cond_to_image(p, pos_hidden, neg_hidden, prompts, seeds, subseeds)
-            if initial_info is None: initial_info = proc.info
-            img = proc.images[0]
-            if genesis == Gensis.SUCCESSIVE: p = update_img2img_p(p, proc.images, denoise_w)
-            images += [img]
+        if 'auxiliary':
+            switch_to_stage = partial(switch_to_stage_binding_, self)
+            process_p = partial(process_p_binding_, self)
+
+            from_pos_hidden:  TensorRef = Ref()
+            from_neg_hidden:  TensorRef = Ref()
+            to_pos_hidden:    TensorRef = Ref()
+            to_neg_hidden:    TensorRef = Ref()
+            inter_pos_hidden: TensorRef = Ref()
+            inter_neg_hidden: TensorRef = Ref()
 
         # Step 1: draw the init image
-        if 'show_debug':
-            print(f'[stage 1/{n_stages}]')
-            print(f'  pos prompts: {pos_prompts[0]}')
-            print(f'  neg prompts: {neg_prompts[0]}')
-        p.prompt          = pos_prompts[0]
-        p.negative_prompt = neg_prompts[0]
-        p.subseed         = self.subseed
-        from_pos_hidden, from_neg_hidden, prompts, seeds, subseeds, from_extra_network_data = process_images_prompt_to_cond(p)
-        gen_image(from_pos_hidden, from_neg_hidden, prompts, seeds, subseeds)
+        switch_to_stage(0)
+        with on_cfg_denoiser_wrapper(partial(get_cond_callback, [from_pos_hidden, from_neg_hidden])):
+            process_p()
 
         # travel through stages
-        i_frames = 1
-        for i in range(1, n_stages):
+        for i in range(1, self.n_stages):
             if state.interrupted: break
 
-            state.job = f'{i_frames}/{n_frames}'
-            state.job_no = i_frames + 1
-            i_frames += 1
+            state.job = f'{i}/{self.n_frames}'
+            state.job_no = i + 1
 
             # only change target prompts
-            if 'show_debug':
-                print(f'[stage {i+1}/{n_stages}]')
-                print(f'  pos prompts: {pos_prompts[i]}')
-                print(f'  neg prompts: {neg_prompts[i]}')
-            p.prompt           = pos_prompts[i]
-            p.negative_prompt  = neg_prompts[i]
-            p.subseed          = self.subseed
-            to_pos_hidden, to_neg_hidden, prompts, seeds, subseeds, to_extra_network_data = process_images_prompt_to_cond(p)
+            switch_to_stage(i)
+            with on_cfg_denoiser_wrapper(partial(get_cond_callback, [to_pos_hidden, to_neg_hidden])):
+                if self.genesis == Gensis.FIXED:
+                    imgs = process_p(append=False)      # stash it to make order right
+                elif self.genesis == Gensis.SUCCESSIVE:
+                    with p_steps_overrider(self.p, steps=1):    # ignore final image, only need cond
+                        process_p(save=False, append=False)
+                else: raise ValueError(f'invalid genesis: {self.genesis.value}')
 
             # Step 2: draw the interpolated images
             is_break_iter = False
-            n_inter = steps[i] + 1
-            for t in range(1, n_inter):
+            n_inter = self.steps[i]
+            for t in range(1, n_inter + (1 if self.genesis == Gensis.SUCCESSIVE else 0)):
                 if state.interrupted: is_break_iter = True ; break
 
-                alpha = t / n_inter     # [1/T, 2/T, .. T-1/T]
-                inter_pos_hidden = lerp_fn(from_pos_hidden, to_pos_hidden, alpha)
-                inter_neg_hidden = lerp_fn(from_neg_hidden, to_neg_hidden, alpha)
-                gen_image(inter_pos_hidden, inter_neg_hidden, prompts, seeds, subseeds)
+                alpha = t / n_inter     # [1/T, 2/T, .. T-1/T] (+ [T/T])?
+                inter_pos_hidden.value = lerp_fn(from_pos_hidden.value, to_pos_hidden.value, alpha)
+                inter_neg_hidden.value = lerp_fn(from_neg_hidden.value, to_neg_hidden.value, alpha)
+                with on_cfg_denoiser_wrapper(partial(set_cond_callback, [inter_pos_hidden, inter_neg_hidden])):
+                    process_p()
 
             if is_break_iter: break
 
-            # Step 3: draw the fianl stage
-            gen_image(to_pos_hidden, to_neg_hidden, prompts, seeds, subseeds)
-            
+            # Step 3: append the final stage
+            if self.genesis != Gensis.SUCCESSIVE: self.images.extend(imgs)
             # move to next stage
-            from_pos_hidden, from_neg_hidden = to_pos_hidden, to_neg_hidden
-            self.extra_networks_deactivate(p, from_extra_network_data)
-            from_extra_network_data = to_extra_network_data
+            from_pos_hidden.value, from_neg_hidden.value = to_pos_hidden.value, to_neg_hidden.value
+            inter_pos_hidden.value, inter_neg_hidden.value = None, None
 
-        self.extra_networks_deactivate(p, from_extra_network_data)
-        return images, initial_info
-
-    def run_linear_embryo(self, p: StableDiffusionProcessing) -> Tuple[List[PILImage], str]:
+    def run_linear_embryo(self):
         ''' NOTE: this procedure has special logic, we separate it from run_linear() so far '''
 
-        lerp_fn     = weighted_sum_cond if self.lerp_meth == LerpMethod.LERP else geometric_slerp_cond
-        embryo_step = self.embryo_step
-        pos_prompts = self.pos_prompts
-        n_frames    = self.steps[1] + 2
+        lerp_fn  = weighted_sum if self.lerp_meth == LerpMethod.LERP else geometric_slerp
+        n_frames = self.steps[1] + 2
 
-        initial_info: str = None
-        images: List[PILImage] = []
-        embryo: Tensor = None       # latent image, the common half-denoised prototype of all frames
+        if 'auxiliary':
+            switch_to_stage = partial(switch_to_stage_binding_, self)
+            process_p = partial(process_p_binding_, self)
 
-        def gen_image(pos_hidden, neg_hidden, prompts, seeds, subseeds, save=True) -> List[PILImage]:
-            nonlocal initial_info, p
-            do_not_save_samples = p.do_not_save_samples
-            if not save: p.do_not_save_samples = True
-            proc = process_images_cond_to_image(p, pos_hidden, neg_hidden, prompts, seeds, subseeds)
-            p.do_not_save_samples = do_not_save_samples
-            if initial_info is None: initial_info = proc.info
-            return proc.images
-
-        from modules.script_callbacks import on_cfg_denoiser, remove_callbacks_for_function, CFGDenoiserParams
-        def get_embryo_fn(params: CFGDenoiserParams):
-            nonlocal embryo, embryo_step
-            if params.sampling_step == embryo_step:
-                embryo = params.x
-        def replace_embryo_fn(params: CFGDenoiserParams):
-            nonlocal embryo, embryo_step
-            if params.sampling_step == embryo_step:
-                params.x.data = embryo
-        class denoiser_hijack:
-            def __init__(self, callback_fn):
-                self.callback_fn = callback_fn
-            def __enter__(self):
-                on_cfg_denoiser(self.callback_fn)
-            def __exit__(self, exc_type, exc_value, exc_traceback):
-                remove_callbacks_for_function(self.callback_fn)
+            from_pos_hidden:  TensorRef = Ref()
+            to_pos_hidden:    TensorRef = Ref()
+            inter_pos_hidden: TensorRef = Ref()
+            embryo:           TensorRef = Ref()     # latent image, the common half-denoised prototype of all frames
 
         # Step 1: get starting & ending condition
-        p.prompt  = pos_prompts[0]
-        p.subseed = self.subseed
-        from_pos_hidden, neg_hidden, prompts, seeds, subseeds, from_extra_network_data = process_images_prompt_to_cond(p)
-
-        p.prompt  = pos_prompts[1]
-        p.subseed = self.subseed
-        to_pos_hidden, neg_hidden, prompts, seeds, subseeds, to_extra_network_data = process_images_prompt_to_cond(p)
+        switch_to_stage(0)
+        with on_cfg_denoiser_wrapper(partial(get_cond_callback, [from_pos_hidden])):
+            with p_steps_overrider(self.p, steps=1):
+                process_p(save=False)
+        switch_to_stage(1)
+        with on_cfg_denoiser_wrapper(partial(get_cond_callback, [to_pos_hidden])):
+            with p_steps_overrider(self.p, steps=1):
+                process_p(save=False)
 
         # Step 2: get the condition middle-point as embryo then hatch it halfway
-        with denoiser_hijack(get_embryo_fn):
-            mid_pos_hidden = weighted_sum_cond(from_pos_hidden, to_pos_hidden, 0.5)
-            gen_image(mid_pos_hidden, neg_hidden, prompts, seeds, subseeds, save=False)
-
+        inter_pos_hidden.value = lerp_fn(from_pos_hidden.value, to_pos_hidden.value, 0.5)
+        with on_cfg_denoiser_wrapper(partial(set_cond_callback, [inter_pos_hidden])):
+            with on_cfg_denoiser_wrapper(partial(get_latent_callback, embryo, self.embryo_step)):
+                process_p(save=False)
         try:
-            img:PILImage = single_sample_to_image(embryo[0])     # the data is duplicated, just get first item
+            img: PILImage = single_sample_to_image(embryo.value[0], approximation=-1)     # the data is duplicated, just get first item
             img.save(os.path.join(self.log_dp, 'embryo.png'))
         except: pass
 
         # Step 3: derive the embryo towards each interpolated condition
-        with denoiser_hijack(replace_embryo_fn):
-            for t in range(0, n_frames+1):
-                if state.interrupted: break
-
-                alpha = t / n_frames     # [0, 1/T, 2/T, .. T-1/T, 1]
-                inter_pos_hidden = lerp_fn(from_pos_hidden, to_pos_hidden, alpha)
-                imgs = gen_image(inter_pos_hidden, neg_hidden, prompts, seeds, subseeds)
-                images.extend(imgs)
-
-        self.extra_networks_deactivate(p, from_extra_network_data)
-        self.extra_networks_deactivate(p, to_extra_network_data)
-        return images, initial_info
-
-    def run_replace(self, p: StableDiffusionProcessing) -> Tuple[List[PILImage], str]:
-        ''' yet another replace method, but do replacing on the condition tensor by token dim or channel dim '''
-
-        genesis       = self.genesis
-        denoise_w     = self.denoise_w
-        pos_prompts   = self.pos_prompts
-        steps         = self.steps
-        replace_dim   = self.replace_dim
-        replace_order = self.replace_order
-        n_stages      = self.n_stages
-        n_frames      = self.n_frames
-
-        if genesis == Gensis.EMBRYO:
-            raise NotImplementedError(f'genesis {genesis.value!r} is only supported in linear mode currently :(')
-
-        initial_info: str = None
-        images: List[PILImage] = []
-
-        def gen_image(pos_hidden, neg_hidden, prompts, seeds, subseeds):
-            nonlocal images, initial_info, p
-            proc = process_images_cond_to_image(p, pos_hidden, neg_hidden, prompts, seeds, subseeds)
-            if initial_info is None: initial_info = proc.info
-            img = proc.images[0]
-            if genesis == Gensis.SUCCESSIVE: p = update_img2img_p(p, proc.images, denoise_w)
-            images += [img]
-
-        # Step 1: draw the init image
-        if 'show_debug':
-            print(f'[stage 1/{n_stages}]')
-            print(f'  pos prompts: {pos_prompts[0]}')
-        p.prompt          = pos_prompts[0]
-        p.subseed         = self.subseed
-        from_pos_hidden, neg_hidden, prompts, seeds, subseeds, from_extra_network_data = process_images_prompt_to_cond(p)
-        gen_image(from_pos_hidden, neg_hidden, prompts, seeds, subseeds)
-        
-        # travel through stages
-        i_frames = 1
-        for i in range(1, n_stages):
+        for t in range(0, n_frames+1):
             if state.interrupted: break
 
-            state.job = f'{i_frames}/{n_frames}'
-            state.job_no = i_frames + 1
-            i_frames += 1
+            alpha = t / n_frames     # [0, 1/T, 2/T, .. T-1/T, 1]
+            inter_pos_hidden.value = lerp_fn(from_pos_hidden.value, to_pos_hidden.value, alpha)
+            with on_cfg_denoiser_wrapper(partial(set_cond_callback, [inter_pos_hidden])):
+                with on_cfg_denoiser_wrapper(partial(set_latent_callback, embryo, self.embryo_step)):
+                    process_p()
+
+    def run_replace(self):
+        ''' yet another replace method, but do replacing on the condition tensor by token dim or channel dim '''
+
+        if self.genesis == Gensis.EMBRYO: raise NotImplementedError(f'genesis {self.genesis.value!r} is only supported in linear mode currently :(')
+
+        if 'auxiliary':
+            switch_to_stage = partial(switch_to_stage_binding_, self)
+            process_p = partial(process_p_binding_, self)
+
+            from_pos_hidden:  TensorRef = Ref()
+            to_pos_hidden:    TensorRef = Ref()
+            inter_pos_hidden: TensorRef = Ref()
+
+        # Step 1: draw the init image
+        switch_to_stage(0)
+        with on_cfg_denoiser_wrapper(partial(get_cond_callback, [from_pos_hidden])):
+            process_p()
+        
+        # travel through stages
+        for i in range(1, self.n_stages):
+            if state.interrupted: break
+
+            state.job = f'{i}/{self.n_frames}'
+            state.job_no = i + 1
 
             # only change target prompts
-            if 'show_debug':
-                print(f'[stage {i+1}/{n_stages}]')
-                print(f'  pos prompts: {pos_prompts[i]}')
-            p.prompt           = pos_prompts[i]
-            p.subseed          = self.subseed
-            to_pos_hidden, neg_hidden, prompts, seeds, subseeds, to_extra_network_data = process_images_prompt_to_cond(p)
+            switch_to_stage(i)
+            with on_cfg_denoiser_wrapper(partial(get_cond_callback, [to_pos_hidden])):
+                if self.genesis == Gensis.FIXED:
+                    imgs = process_p(append=False)      # stash it to make order right
+                elif self.genesis == Gensis.SUCCESSIVE:
+                    with p_steps_overrider(self.p, steps=1):    # ignore final image, only need cond
+                        process_p(save=False, append=False)
+                else: raise ValueError(f'invalid genesis: {self.genesis.value}')
 
             # ========== ↓↓↓ major differences from run_linear() ↓↓↓ ==========
             
             # decide change portion in each iter
-            L1 = torch.abs(cond_get(from_pos_hidden) - cond_get(to_pos_hidden))
-            if   replace_dim == ModeReplaceDim.RANDOM:
+            L1 = torch.abs(from_pos_hidden.value - to_pos_hidden.value)
+            if   self.replace_dim == ModeReplaceDim.RANDOM:
                 dist = L1                  # [T=77, D=768]
-            elif replace_dim == ModeReplaceDim.TOKEN:
+            elif self.replace_dim == ModeReplaceDim.TOKEN:
                 dist = L1.mean(axis=1)     # [T=77]
-            elif replace_dim == ModeReplaceDim.CHANNEL:
+            elif self.replace_dim == ModeReplaceDim.CHANNEL:
                 dist = L1.mean(axis=0)     # [D=768]
-            else: raise ValueError(f'unknown replace_dim: {replace_dim}')
+            else: raise ValueError(f'unknown replace_dim: {self.replace_dim}')
             mask = dist > EPS
             dist = torch.where(mask, dist, 0.0)
             n_diff = mask.sum().item()            # when value differs we have mask==True
-            n_inter = steps[i] + 1
+            n_inter = self.steps[i] + 1
             replace_count = int(n_diff / n_inter) + 1    # => accumulative modifies [1/T, 2/T, .. T-1/T] of total cond
 
             # Step 2: draw the replaced images
-            inter_pos_hidden = from_pos_hidden
+            inter_pos_hidden.value = from_pos_hidden.value
             is_break_iter = False
             for _ in range(1, n_inter):
                 if state.interrupted: is_break_iter = True ; break
 
-                inter_pos_hidden = replace_until_match_cond(inter_pos_hidden, to_pos_hidden, replace_count, dist=dist, order=replace_order)
-                gen_image(inter_pos_hidden, neg_hidden, prompts, seeds, subseeds)
+                inter_pos_hidden.value = replace_until_match(inter_pos_hidden.value, to_pos_hidden.value, replace_count, dist=dist, order=self.replace_order)
+                with on_cfg_denoiser_wrapper(partial(set_cond_callback, [inter_pos_hidden])):
+                    process_p()
             
             # ========== ↑↑↑ major differences from run_linear() ↑↑↑ ==========
 
             if is_break_iter: break
 
-            # Step 3: draw the fianl stage
-            gen_image(to_pos_hidden, neg_hidden, prompts, seeds, subseeds)
-            
+            # Step 3: append the final stage
+            if self.genesis != Gensis.SUCCESSIVE: self.images.extend(imgs)
             # move to next stage
-            from_pos_hidden = to_pos_hidden
-            self.extra_networks_deactivate(p, from_extra_network_data)
-            from_extra_network_data = to_extra_network_data
-
-        self.extra_networks_deactivate(p, from_extra_network_data)
-        return images, initial_info
-
-    ''' ↓↓↓ helpers ↓↓↓ '''
-
-    def extra_networks_deactivate(self, p:StableDiffusionProcessing, extra_network_data):
-        if not p.disable_extra_networks and extra_network_data:
-            extra_networks.deactivate(p, extra_network_data)
+            from_pos_hidden.value = to_pos_hidden.value
+            inter_pos_hidden.value = None
 
     ''' ↓↓↓ extension support ↓↓↓ '''
 
-    def ext_depth_preprocess(self, p: StableDiffusionProcessing, depth_img: PILImage):  # copy from repo `AnonymousCervine/depth-image-io-for-SDWebui`
+    def ext_depth_preprocess(self, p:Processing, depth_img:PILImage):  # copy from repo `AnonymousCervine/depth-image-io-for-SDWebui`
         from types import MethodType
         from einops import repeat, rearrange
         import modules.shared as shared
         import modules.devices as devices
 
         def sanitize_pil_image_mode(img):
-            invalid_modes = {'P', 'CMYK', 'HSV'}
-            if img.mode in invalid_modes:
+            if img.mode in {'P', 'CMYK', 'HSV'}:
                 img = img.convert(mode='RGB')
             return img
 
@@ -1070,5 +814,5 @@ class Script(scripts.Script):
 
         p.txt2img_image_conditioning = MethodType(alt_txt2img_image_conditioning, p)
 
-    def ext_depth_postprocess(self, p: StableDiffusionProcessing, depth_img: PILImage):
+    def ext_depth_postprocess(self, p:Processing, depth_img:PILImage):
         depth_img.close()

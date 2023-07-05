@@ -25,14 +25,22 @@ Not only prompts! We also support non-prompt conditions, read => [README_ext.md]
 ℹ 实话不说，我想有可能通过这个来做ppt童话绘本<del>甚至本子</del>……  
 ℹ 聪明的用法：先手工盲搜两张好看的图 (只有prompt差异)，然后再尝试在其间 travel :lolipop:  
 
-⚠ Remeber to check "Always save all generated images" on in the settings tab, otherwise upscaling and saving intermediate images would not work.
+⚠ Remeber to check "Always save all generated images" on in the settings tab, otherwise "upscaling" and "saving intermediate images" would not work.
 ⚠ 记得在设置页勾选 “总是保存所有生成的图片”，否则 上采样 与 保存中间图片 将无法工作。
 
 
 ### Change Log
 
+⚪ Compatibility
+
+The latest version `v3.0` is synced & tested with:
+
+- [AUTOMATIC1111/stable-diffusion-webui](https://github.com/AUTOMATIC1111/stable-diffusion-webui): version `v1.4.0`, tag [v1.4.0](https://github.com/AUTOMATIC1111/stable-diffusion-webui/releases/tag/v1.4.0)
+- [Mikubill/sd-webui-controlnet](https://github.com/Mikubill/sd-webui-controlnet): version `v1.1.229`, commit [eceeec7a7e](https://github.com/Mikubill/sd-webui-controlnet/commit/eceeec7a7e856867de56e26cae9f3e1076480344)
+
 ⚪ Features
 
+- 2023/07/05: `v3.0` re-impl core with sd-webui `v1.4.0` callbacks; this new implementation will be slower, but more compatible with other extensions
 - 2023/04/13: `v2.7` add RIFE to controlnet-travel, skip fusion (experimental)
 - 2023/03/31: `v2.6` add a tkinter [GUI](#run-each-time) for postprocess toolchain
 - 2023/03/30: `v2.5` add controlnet-travel script (experimental), interpolating between hint conditions **instead of prompts**, thx for the code base from [sd-webui-controlnet](https://github.com/Mikubill/sd-webui-controlnet) 
@@ -49,6 +57,7 @@ Not only prompts! We also support non-prompt conditions, read => [README_ext.md]
 
 ⚪ Fixups
 
+- 2023/07/05: sync sd-webui-controlnet to `v1.1.229`
 - 2023/04/30: update controlnet core to `v1.1.116`
 - 2023/03/29: `v2.4` bug fixes on script hook, now working correctly with extra networks & [sd-webui-controlnet](https://github.com/Mikubill/sd-webui-controlnet)
 - 2023/01/31: keep up with webui's updates, (issue #14: `ImportError: cannot import name 'single_sample_to_image'`)
@@ -243,7 +252,7 @@ For Linux/Mac:
 
 ⚪ extensions that inspired this repo
 
-- controlnet (various image conditions): [https://github.com/Mikubill/sd-webui-controlnet](https://github.com/Mikubill/sd-webui-controlnet)
+- sd-webui-controlnet (various image conditions): [https://github.com/Mikubill/sd-webui-controlnet](https://github.com/Mikubill/sd-webui-controlnet)
 - depth-image-io (custom depth2img): [https://github.com/AnonymousCervine/depth-image-io-for-SDWebui](https://github.com/AnonymousCervine/depth-image-io-for-SDWebui)
 - animator (img2img): [https://github.com/Animator-Anon/animator_extension](https://github.com/Animator-Anon/animator_extension)
 - sd-webui-riffusion (music gen): [https://github.com/enlyth/sd-webui-riffusion](https://github.com/enlyth/sd-webui-riffusion)
