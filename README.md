@@ -33,13 +33,14 @@ Not only prompts! We also support non-prompt conditions, read => [README_ext.md]
 
 ⚪ Compatibility
 
-The latest version `v3.0` is synced & tested with:
+The latest version `v3.1` is synced & tested with:
 
-- [AUTOMATIC1111/stable-diffusion-webui](https://github.com/AUTOMATIC1111/stable-diffusion-webui): version `v1.4.0`, tag [v1.4.0](https://github.com/AUTOMATIC1111/stable-diffusion-webui/releases/tag/v1.4.0)
+- [AUTOMATIC1111/stable-diffusion-webui](https://github.com/AUTOMATIC1111/stable-diffusion-webui): version `v1.5.1`, tag [v1.5.1](https://github.com/AUTOMATIC1111/stable-diffusion-webui/releases/tag/v1.5.1)
 - [Mikubill/sd-webui-controlnet](https://github.com/Mikubill/sd-webui-controlnet): version `v1.1.229`, commit [eceeec7a7e](https://github.com/Mikubill/sd-webui-controlnet/commit/eceeec7a7e856867de56e26cae9f3e1076480344)
 
 ⚪ Features
 
+- 2023/07/31: `v3.1` supports SDXL v1.0 models
 - 2023/07/05: `v3.0` re-impl core with sd-webui `v1.4.0` callbacks; this new implementation will be slower, but more compatible with other extensions
 - 2023/04/13: `v2.7` add RIFE to controlnet-travel, skip fusion (experimental)
 - 2023/03/31: `v2.6` add a tkinter [GUI](#run-each-time) for postprocess toolchain

@@ -1,5 +1,5 @@
 # This extension works with [https://github.com/AUTOMATIC1111/stable-diffusion-webui](https://github.com/AUTOMATIC1111/stable-diffusion-webui)
-# version: v1.4.0
+# version: v1.5.1
 
 LOG_PREFIX = '[Prompt-Travel]'
 
@@ -9,7 +9,7 @@ from PIL.Image import Image as PILImage
 from enum import Enum
 from dataclasses import dataclass
 from functools import partial
-from typing import List, Tuple, Callable, Any, Optional, Generic, TypeVar
+from typing import List, Tuple, Callable, Any, Union, Optional, Generic, TypeVar
 from traceback import print_exc, format_exc
 
 import gradio as gr
@@ -31,6 +31,15 @@ from modules.processing import process_images, get_fixed_seed
 from modules.processing import Processed, StableDiffusionProcessing as Processing, StableDiffusionProcessingTxt2Img as ProcessingTxt2Img, StableDiffusionProcessingImg2Img as ProcessingImg2Img
 from modules.images import resize_image
 from modules.sd_samplers_common import single_sample_to_image
+from modules.prompt_parser import DictWithShape
+
+'''
+DictWithShape {
+  'crossattn': Tensor,
+  'vector': Tensor,
+}
+'''
+Cond = Union[Tensor, DictWithShape]
 
 class Mode(Enum):
     LINEAR  = 'linear'
@@ -65,7 +74,7 @@ if 'typing':
     @dataclass
     class Ref(Generic[T]): value: T = None
 
-    TensorRef = Ref[Tensor]
+    CondRef = Ref[Tensor]
     StrRef = Ref[str]
     PILImages = List[PILImage]
     RunResults = Tuple[PILImages, str]
@@ -125,46 +134,58 @@ if 'consts':
     EPS = 1e-6
 
 
-def cond_align(condA:Tensor, condB:Tensor) -> Tuple[Tensor, Tensor]:
-    d = condA.shape[0] - condB.shape[0]
-    if   d < 0: condA = F.pad(condA, (0, 0, 0, -d))
-    elif d > 0: condB = F.pad(condB, (0, 0, 0,  d))
-    return condA, condB
+def wrap_cond_align(fn:Callable[..., Cond]):
+    def cond_align(condA:Cond, condB:Cond) -> Tuple[Cond, Cond]:
+        def align_tensor(x:Tensor, y:Tensor) -> Tuple[Tensor, Tensor]:
+            d = x.shape[0] - y.shape[0]
+            if   d < 0: x = F.pad(x, (0, 0, 0, -d))
+            elif d > 0: y = F.pad(y, (0, 0, 0,  d))
+            return x, y
 
-def wrap_cond_align(fn:Callable[..., Tensor]):
-    def wrapper(condA:Tensor, condB:Tensor, *args, **kwargs) -> Tensor:
+        if isinstance(condA, dict):     # SDXL
+            for key in condA:
+                condA[key], condB[key] = align_tensor(condA[key], condB[key])
+        else:
+            condA, condB = align_tensor(condA, condB)
+        return condA, condB
+
+    def wrapper(condA:Cond, condB:Cond, *args, **kwargs) -> Cond:
         condA, condB = cond_align(condA, condB)
-        return fn(condA, condB, *args, **kwargs)
+        if isinstance(condA, dict):     # SDXL
+            stacked = { key: fn(condA[key], condB[key], *args, **kwargs) for key in condA }
+            return DictWithShape(stacked, stacked['crossattn'].shape)
+        else:
+            return fn(condA, condB, *args, **kwargs)
     return wrapper
 
 @wrap_cond_align
-def weighted_sum(condA:Tensor, condB:Tensor, alpha:float) -> Tensor:
+def weighted_sum(A:Tensor, B:Tensor, alpha:float) -> Tensor:
     ''' linear interpolate on latent space of condition '''
 
-    return (1 - alpha) * condA + (alpha) * condB
+    return (1 - alpha) * A + (alpha) * B
 
 @wrap_cond_align
-def geometric_slerp(condA:Tensor, condB:Tensor, alpha:float) -> Tensor:
+def geometric_slerp(A:Tensor, B:Tensor, alpha:float) -> Tensor:
     ''' spherical linear interpolation on latent space of condition, ref: https://en.wikipedia.org/wiki/Slerp '''
 
-    A_n = condA / torch.norm(condA, dim=-1, keepdim=True)   # [T=77, D=768]
-    B_n = condB / torch.norm(condB, dim=-1, keepdim=True)
+    A_n = A / torch.norm(A, dim=-1, keepdim=True)   # [T=77, D=768]
+    B_n = B / torch.norm(B, dim=-1, keepdim=True)
 
     dot = (A_n * B_n).sum(dim=-1, keepdim=True)     # [T=77, D=1]
     omega = torch.acos(dot)                         # [T=77, D=1]
     so = torch.sin(omega)                           # [T=77, D=1]
 
-    slerp = (torch.sin((1 - alpha) * omega) / so) * condA + (torch.sin(alpha * omega) / so) * condB
+    slerp = (torch.sin((1 - alpha) * omega) / so) * A + (torch.sin(alpha * omega) / so) * B
 
     mask: Tensor = dot > 0.9995                     # [T=77, D=1]
     if not mask.any():
         return slerp
     else:
-        lerp = (1 - alpha) * condA + (alpha) * condB
+        lerp = (1 - alpha) * A + (alpha) * B
         return torch.where(mask, lerp, slerp)       # use simple lerp when angle very close to avoid NaN
 
 @wrap_cond_align
-def replace_until_match(condA:Tensor, condB:Tensor, count:int, dist:Tensor, order:str=ModeReplaceOrder.RANDOM) -> Tensor:
+def replace_until_match(A:Tensor, B:Tensor, count:int, dist:Tensor, order:str=ModeReplaceOrder.RANDOM) -> Tensor:
     ''' value substite on condition tensor; will inplace modify `dist` '''
 
     def index_tensor_to_tuple(index:Tensor) -> Tuple[Tensor, ...]:
@@ -194,14 +215,14 @@ def replace_until_match(condA:Tensor, condB:Tensor, count:int, dist:Tensor, orde
     dist[idx_diff_sel_tp] = 0.0
     mask[idx_diff_sel_tp] = False
 
-    if mask.shape != condA.shape:   # cond.shape = [T=77, D=768]
+    if mask.shape != A.shape:   # cond.shape = [T=77, D=768]
         mask_len = mask.shape[0]
-        if   mask_len == condA.shape[0]: mask = mask.unsqueeze(1)
-        elif mask_len == condA.shape[1]: mask = mask.unsqueeze(0)
+        if   mask_len == A.shape[0]: mask = mask.unsqueeze(1)
+        elif mask_len == A.shape[1]: mask = mask.unsqueeze(0)
         else: raise ValueError(f'unknown mask.shape: {mask.shape}')
-        mask = mask.expand_as(condA)
+        mask = mask.expand_as(A)
 
-    return mask * condA + ~mask * condB
+    return mask * A + ~mask * B
 
 
 def get_next_sequence_number(path:str) -> int:
@@ -358,28 +379,33 @@ class p_save_samples_overrider:
     def __exit__(self, exc_type, exc_value, exc_traceback):
         self.p.do_not_save_samples = self.do_not_save_samples_saved
 
-def get_cond_callback(refs:List[TensorRef], params:CFGDenoiserParams):
+def get_cond_callback(refs:List[CondRef], params:CFGDenoiserParams):
     if params.sampling_step > 0: return
-    values = [
-        params.text_cond,        # [B=1, L= 77, D=768]
-        params.text_uncond,      # [B=1, L=231, D=768]
+    values: List[Cond] = [
+        params.text_cond,        # [B=1, L= 77, D=768/2048]
+        params.text_uncond,      # [B=1, L=231, D=768/2048]
     ]
     for i, ref in enumerate(refs):
         ref.value = values[i]
 
-def set_cond_callback(refs:List[TensorRef], params:CFGDenoiserParams):
-    values = [
-        params.text_cond,        # [B=1, L= 77, D=768]
-        params.text_uncond,      # [B=1, L=231, D=768]
+def set_cond_callback(refs:List[CondRef], params:CFGDenoiserParams):
+    values: List[Cond] = [
+        params.text_cond,        # [B=1, L= 77, D=768/2048]
+        params.text_uncond,      # [B=1, L=231, D=768/2048]
     ]
     for i, ref in enumerate(refs):
-        values[i].data = ref.value
+        refv = ref.value
+        if isinstance(refv, dict):   # SDXL
+            for key in refv:
+                values[i][key].data = refv[key]
+        else:
+            values[i].data = refv
 
-def get_latent_callback(ref:TensorRef, embryo_step:int, params:CFGDenoiserParams):
+def get_latent_callback(ref:CondRef, embryo_step:int, params:CFGDenoiserParams):
     if params.sampling_step != embryo_step: return
     ref.value = params.x
 
-def set_latent_callback(ref:TensorRef, embryo_step:int, params:CFGDenoiserParams):
+def set_latent_callback(ref:CondRef, embryo_step:int, params:CFGDenoiserParams):
     if params.sampling_step != embryo_step: return
     params.x.data = ref.value
 
@@ -605,12 +631,12 @@ class Script(scripts.Script):
             switch_to_stage = partial(switch_to_stage_binding_, self)
             process_p = partial(process_p_binding_, self)
 
-            from_pos_hidden:  TensorRef = Ref()
-            from_neg_hidden:  TensorRef = Ref()
-            to_pos_hidden:    TensorRef = Ref()
-            to_neg_hidden:    TensorRef = Ref()
-            inter_pos_hidden: TensorRef = Ref()
-            inter_neg_hidden: TensorRef = Ref()
+            from_pos_hidden:  CondRef = Ref()
+            from_neg_hidden:  CondRef = Ref()
+            to_pos_hidden:    CondRef = Ref()
+            to_neg_hidden:    CondRef = Ref()
+            inter_pos_hidden: CondRef = Ref()
+            inter_neg_hidden: CondRef = Ref()
 
         # Step 1: draw the init image
         switch_to_stage(0)
@@ -664,10 +690,10 @@ class Script(scripts.Script):
             switch_to_stage = partial(switch_to_stage_binding_, self)
             process_p = partial(process_p_binding_, self)
 
-            from_pos_hidden:  TensorRef = Ref()
-            to_pos_hidden:    TensorRef = Ref()
-            inter_pos_hidden: TensorRef = Ref()
-            embryo:           TensorRef = Ref()     # latent image, the common half-denoised prototype of all frames
+            from_pos_hidden:  CondRef = Ref()
+            to_pos_hidden:    CondRef = Ref()
+            inter_pos_hidden: CondRef = Ref()
+            embryo:           CondRef = Ref()     # latent image, the common half-denoised prototype of all frames
 
         # Step 1: get starting & ending condition
         switch_to_stage(0)
@@ -708,9 +734,9 @@ class Script(scripts.Script):
             switch_to_stage = partial(switch_to_stage_binding_, self)
             process_p = partial(process_p_binding_, self)
 
-            from_pos_hidden:  TensorRef = Ref()
-            to_pos_hidden:    TensorRef = Ref()
-            inter_pos_hidden: TensorRef = Ref()
+            from_pos_hidden:  CondRef = Ref()
+            to_pos_hidden:    CondRef = Ref()
+            inter_pos_hidden: CondRef = Ref()
 
         # Step 1: draw the init image
         switch_to_stage(0)
