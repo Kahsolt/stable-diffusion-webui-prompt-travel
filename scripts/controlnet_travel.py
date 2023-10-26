@@ -35,6 +35,7 @@ if 'externel repo sanity check':
 
 
 import sys
+from subprocess import Popen
 from PIL import Image
 
 from ldm.models.diffusion.ddpm import LatentDiffusion
@@ -42,7 +43,7 @@ from modules import shared, devices, lowvram
 from modules.processing import StableDiffusionProcessing as Processing
 
 from scripts.prompt_travel import *
-from manager import run_cmd
+
 
 class InterpMethod(Enum):
     LINEAR = 'linear (weight sum)'
@@ -77,6 +78,15 @@ if 'vars':
     to_control_tensors:   List[List[Tensor]] = []
 
     caches: List[list] = [from_hint_cond, to_hint_cond, mid_hint_cond, from_control_tensors, to_control_tensors]
+
+
+def run_cmd(cmd:str) -> bool:
+  try:
+    print(f'[exec] {cmd}')
+    Popen(cmd, shell=True, encoding='utf-8').wait()
+    return True
+  except:
+    return False
 
 
 # ↓↓↓ the following is modified from 'sd-webui-controlnet/scripts/hook.py' ↓↓↓
