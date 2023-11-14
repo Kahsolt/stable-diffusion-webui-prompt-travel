@@ -3,6 +3,7 @@
 
 LOG_PREFIX = '[Prompt-Travel]'
 
+import inspect
 import os
 from pathlib import Path
 from PIL.Image import Image as PILImage
@@ -685,7 +686,7 @@ class Script(scripts.Script):
             # Step 3: append the final stage
             if self.genesis != Gensis.SUCCESSIVE: self.images.extend(imgs)
 
-            if self.ssim_diff > 0:
+            if self.ssim_diff > 0 and self.genesis == Gensis.FIXED:
                 # SSIM
                 (
                     skip_count,
@@ -941,6 +942,7 @@ class Script(scripts.Script):
 
                     if d2 > d or d2 < ssim_diff * ssim_diff_min / 100.0:
                         # Keep image if it is improvment or hasn't reached desired min ssim_diff
+                        #scribble_debug(image, f"{i+1}:{new_dist}")
                         prompt_images.insert(i + 1, image)
                         dists.insert(i + 1, new_dist)
 
@@ -1025,3 +1027,13 @@ class Script(scripts.Script):
 
     def ext_depth_postprocess(self, p:Processing, depth_img:PILImage):
         depth_img.close()
+
+def scribble_debug(image: PILImage, txt: str):
+    """Draws text on image for dev tests"""
+    from PIL import Image, ImageDraw
+    from modules import images
+    draw = ImageDraw.Draw(image)
+    fnt = images.get_font(14)
+    box = draw.textbbox((12, 12), txt, font=fnt)
+    draw.rounded_rectangle(box, radius=4, fill="black")
+    draw.text((12, 12), txt, fill="white", font=fnt)
