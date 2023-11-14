@@ -258,50 +258,10 @@ def update_img2img_p(p:Processing, imgs:PILImages, denoising_strength:float=0.75
         return p
 
     if isinstance(p, ProcessingTxt2Img):
-        KNOWN_KEYS = [      # see `StableDiffusionProcessing.__init__()`
-            'sd_model',
-            'outpath_samples',
-            'outpath_grids',
-            'prompt',
-            'styles',
-            'seed',
-            'subseed',
-            'subseed_strength',
-            'seed_resize_from_h',
-            'seed_resize_from_w',
-            'seed_enable_extras',
-            'sampler_name',
-            'batch_size',
-            'n_iter',
-            'steps',
-            'cfg_scale',
-            'width',
-            'height',
-            'restore_faces',
-            'tiling',
-            'do_not_save_samples',
-            'do_not_save_grid',
-            'extra_generation_params',
-            'overlay_images',
-            'negative_prompt',
-            'eta',
-            'do_not_reload_embeddings',
-            #'denoising_strength',
-            'ddim_discretize',
-            's_min_uncond',
-            's_churn',
-            's_tmax',
-            's_tmin',
-            's_noise',
-            'override_settings',
-            'override_settings_restore_afterwards',
-            'sampler_index',
-            'script_args',
-        ]
-        kwargs = { k: getattr(p, k) for k in dir(p) if k in KNOWN_KEYS }    # inherit params
+        kwargs = {k: getattr(p, k) for k in dir(p) if k in inspect.signature(ProcessingImg2Img).parameters}    # inherit params
+        kwargs['denoising_strength'] = denoising_strength
         return ProcessingImg2Img(
             init_images=imgs,
-            denoising_strength=denoising_strength,
             **kwargs,
         )
 
