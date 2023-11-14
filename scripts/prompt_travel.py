@@ -485,6 +485,9 @@ class Script(scripts.Script):
             ssim_diff_min = gr.Slider(
                 label="SSIM min threshold", value=75, minimum=0, maximum=100, step=1
             )
+            ssim_blur = gr.Slider(
+                label="SSIM blur (helps with images featuring many small changing details)", value=0, minimum=0, maximum=100, step=1
+            )
 
         return [
             mode, lerp_meth, replace_dim, replace_order,
@@ -493,7 +496,7 @@ class Script(scripts.Script):
             upscale_meth, upscale_ratio, upscale_width, upscale_height,
             video_fmt, video_fps, video_pad, video_pick,
             ext_video, ext_upscale, ext_depth, ssim_diff, ssim_ccrop,
-            substep_min, ssim_diff_min
+            substep_min, ssim_diff_min, ssim_blur
         ]
 
     def run(self, p:Processing, 
@@ -504,7 +507,7 @@ class Script(scripts.Script):
             video_fmt:str, video_fps:float, video_pad:int, video_pick:str,
             ext_video:bool, ext_upscale:bool, ext_depth:bool,
             ssim_diff: float, ssim_ccrop:int,
-            substep_min:float, ssim_diff_min:int
+            substep_min:float, ssim_diff_min:int, ssim_blur:int
         ):
         
         # enum lookup
@@ -593,6 +596,7 @@ class Script(scripts.Script):
         self.ssim_ccrop     = ssim_ccrop
         self.substep_min    = substep_min
         self.ssim_diff_min  = ssim_diff_min
+        self.ssim_blur = ssim_blur
 
         def upscale_image_callback(params:ImageSaveParams):
             params.image = upscale_image(params.image, p.width, p.height, upscale_meth, upscale_ratio, upscale_width, upscale_height)
@@ -901,9 +905,16 @@ class Script(scripts.Script):
                 break
             check = False
             for i in range(done, len(prompt_images) - 1):
+                a_img: PILImage = prompt_images[i]
+                b_img: PILImage = prompt_images[i + 1]
+                if self.ssim_blur > 0:
+                    from PIL import ImageFilter
+                    a_img: PILImage = prompt_images[i].filter(ImageFilter.GaussianBlur(radius=self.ssim_blur))
+                    b_img: PILImage = prompt_images[i + 1].filter(ImageFilter.GaussianBlur(radius=self.ssim_blur))
+                    
                 # Check distance between i and i+1
-                a = transform(prompt_images[i]).unsqueeze(0)
-                b = transform(prompt_images[i + 1]).unsqueeze(0)
+                a = transform(a_img).unsqueeze(0)
+                b = transform(b_img).unsqueeze(0)
                 d = ssim(a, b)
 
                 if d < ssim_diff and (dists[i + 1] - dists[i]) > substep_min:
