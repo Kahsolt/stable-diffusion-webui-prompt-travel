@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from functools import partial
 from typing import List, Tuple, Callable, Any, Union, Optional, Generic, TypeVar
 from traceback import print_exc, format_exc
+from torchmetrics import StructuralSimilarityIndexMeasure
+from torchvision import transforms
 
 import gradio as gr
 import numpy as np
@@ -504,13 +506,34 @@ class Script(scripts.Script):
             ext_upscale.change(gr_show, inputs=ext_upscale, outputs=tab_ext_upscale, show_progress=False)
             ext_depth  .change(gr_show, inputs=ext_depth,   outputs=tab_ext_depth,   show_progress=False)
 
+        with gr.Accordion(label="Structual Similarity Index Metric", open=False):
+            gr.Markdown(
+                "If this is set to something other than 0, the script will first"
+                " generate the steps you've specified above,                 but then"
+                " take a second pass and fill in the gaps between images that differ"
+                " too much according to Structual Similarity Index Metric \n           "
+                "         *Only implemented for linear travel and only for fixed or"
+                " successive frame genesis*"
+            )
+            ssim_diff = gr.Slider(
+                label="SSIM threshold", value=0.0, minimum=0.0, maximum=1.0, step=0.01
+            )
+            ssim_ccrop = gr.Slider(
+                label="SSIM CenterCrop%", value=0, minimum=0, maximum=100, step=1
+            )
+            substep_min = gr.Number(label="SSIM minimum step", value=0.0001)
+            ssim_diff_min = gr.Slider(
+                label="SSIM min threshold", value=75, minimum=0, maximum=100, step=1
+            )
+
         return [
             mode, lerp_meth, replace_dim, replace_order,
             steps, genesis, denoise_w, embryo_step,
             depth_img,
             upscale_meth, upscale_ratio, upscale_width, upscale_height,
             video_fmt, video_fps, video_pad, video_pick,
-            ext_video, ext_upscale, ext_depth,
+            ext_video, ext_upscale, ext_depth, ssim_diff, ssim_ccrop,
+            substep_min, ssim_diff_min
         ]
 
     def run(self, p:Processing, 
@@ -520,6 +543,8 @@ class Script(scripts.Script):
             upscale_meth:str, upscale_ratio:float, upscale_width:int, upscale_height:int,
             video_fmt:str, video_fps:float, video_pad:int, video_pick:str,
             ext_video:bool, ext_upscale:bool, ext_depth:bool,
+            ssim_diff: float, ssim_ccrop:int,
+            substep_min:float, ssim_diff_min:int
         ):
         
         # enum lookup
@@ -593,17 +618,21 @@ class Script(scripts.Script):
         state.job_count = n_frames
 
         # Pack parameters
-        self.pos_prompts   = pos_prompts
-        self.neg_prompts   = neg_prompts
-        self.steps         = steps
-        self.genesis       = genesis
-        self.denoise_w     = denoise_w
-        self.embryo_step   = embryo_step
-        self.lerp_meth     = lerp_meth
-        self.replace_dim   = replace_dim
-        self.replace_order = replace_order
-        self.n_stages      = n_stages
-        self.n_frames      = n_frames
+        self.pos_prompts    = pos_prompts
+        self.neg_prompts    = neg_prompts
+        self.steps          = steps
+        self.genesis        = genesis
+        self.denoise_w      = denoise_w
+        self.embryo_step    = embryo_step
+        self.lerp_meth      = lerp_meth
+        self.replace_dim    = replace_dim
+        self.replace_order  = replace_order
+        self.n_stages       = n_stages
+        self.n_frames       = n_frames
+        self.ssim_diff      = ssim_diff
+        self.ssim_ccrop     = ssim_ccrop
+        self.substep_min    = substep_min
+        self.ssim_diff_min  = ssim_diff_min
 
         def upscale_image_callback(params:ImageSaveParams):
             params.image = upscale_image(params.image, p.width, p.height, upscale_meth, upscale_ratio, upscale_width, upscale_height)
@@ -678,8 +707,16 @@ class Script(scripts.Script):
                 if state.interrupted: is_break_iter = True ; break
 
                 alpha = t / n_inter     # [1/T, 2/T, .. T-1/T] (+ [T/T])?
-                inter_pos_hidden.value = lerp_fn(from_pos_hidden.value, to_pos_hidden.value, alpha)
-                inter_neg_hidden.value = lerp_fn(from_neg_hidden.value, to_neg_hidden.value, alpha)
+                self.interpolate(
+                    lerp_fn=lerp_fn,
+                    from_pos_hidden=from_pos_hidden,
+                    from_neg_hidden=from_neg_hidden,
+                    to_pos_hidden=to_pos_hidden,
+                    to_neg_hidden=to_neg_hidden,
+                    inter_pos_hidden=inter_pos_hidden,
+                    inter_neg_hidden=inter_neg_hidden,
+                    alpha=alpha,
+                )
                 with on_cfg_denoiser_wrapper(partial(set_cond_callback, [inter_pos_hidden, inter_neg_hidden])):
                     process_p()
 
@@ -687,9 +724,55 @@ class Script(scripts.Script):
 
             # Step 3: append the final stage
             if self.genesis != Gensis.SUCCESSIVE: self.images.extend(imgs)
+
+            if self.ssim_diff > 0:
+                # SSIM
+                (
+                    skip_count,
+                    not_better,
+                    skip_ssim_min,
+                    min_step,
+                    interpolated_images,
+                ) = self.ssim_loop(
+                    p=self.p,
+                    ssim_diff=self.ssim_diff,
+                    ssim_ccrop=self.ssim_ccrop,
+                    ssim_diff_min=self.ssim_diff_min,
+                    substep_min=self.substep_min,
+                    prompt_images=self.images[-(n_inter + 1) :],
+                    lerp_fn=lerp_fn,
+                    process_p=process_p,
+                    from_pos_hidden=from_pos_hidden,
+                    from_neg_hidden=from_neg_hidden,
+                    to_pos_hidden=to_pos_hidden,
+                    to_neg_hidden=to_neg_hidden,
+                    inter_pos_hidden=inter_pos_hidden,
+                    inter_neg_hidden=inter_neg_hidden,
+                )
+                self.images = self.images[: -(n_inter + 1)] + interpolated_images
+
+            
             # move to next stage
             from_pos_hidden.value, from_neg_hidden.value = to_pos_hidden.value, to_neg_hidden.value
             inter_pos_hidden.value, inter_neg_hidden.value = None, None
+
+    def interpolate(
+        self,
+        lerp_fn,
+        from_pos_hidden,
+        from_neg_hidden,
+        to_pos_hidden,
+        to_neg_hidden,
+        inter_pos_hidden,
+        inter_neg_hidden,
+        alpha,
+    ):
+        inter_pos_hidden.value = lerp_fn(
+            from_pos_hidden.value, to_pos_hidden.value, alpha
+        )
+        inter_neg_hidden.value = lerp_fn(
+            from_neg_hidden.value, to_neg_hidden.value, alpha
+        )
 
     def run_linear_embryo(self):
         ''' NOTE: this procedure has special logic, we separate it from run_linear() so far '''
@@ -807,6 +890,135 @@ class Script(scripts.Script):
             # move to next stage
             from_pos_hidden.value = to_pos_hidden.value
             inter_pos_hidden.value = None
+
+    def ssim_loop(
+        self,
+        p,
+        ssim_diff,
+        ssim_ccrop,
+        ssim_diff_min,
+        substep_min,
+        prompt_images,
+        lerp_fn,
+        process_p,
+        from_pos_hidden,
+        from_neg_hidden,
+        to_pos_hidden,
+        to_neg_hidden,
+        inter_pos_hidden,
+        inter_neg_hidden,
+    ):
+        """Copied from shift-attentions plugin: https://github.com/yownas/shift-attention/blob/0129f6b99109f6f7c9e4e2bee0d1dc5f96e62506/scripts/shift_attention.py#L268"""
+
+        dist_per_image = 1 / (len(prompt_images) - 1)
+        dists = [dist_per_image * (i) for i, _ in enumerate(prompt_images)]
+
+        ssim = StructuralSimilarityIndexMeasure(data_range=1.0)
+        if ssim_ccrop == 0:
+            transform = transforms.Compose([transforms.ToTensor()])
+        else:
+            transform = transforms.Compose(
+                [
+                    transforms.CenterCrop(
+                        (
+                            p.height * (ssim_ccrop / 100),
+                            p.width * (ssim_ccrop / 100),
+                        )
+                    ),
+                    transforms.ToTensor(),
+                ]
+            )
+
+        check = True
+        skip_count = 0
+        not_better = 0
+        skip_ssim_min = 1.0
+        min_step = 1.0
+
+        done = 0
+        while check:
+            if state.interrupted:
+                break
+            check = False
+            for i in range(done, len(prompt_images) - 1):
+                # Check distance between i and i+1
+                a = transform(prompt_images[i]).unsqueeze(0)
+                b = transform(prompt_images[i + 1]).unsqueeze(0)
+                d = ssim(a, b)
+
+                if d < ssim_diff and (dists[i + 1] - dists[i]) > substep_min:
+                    print(
+                        f"SSIM: {dists[i]} <-> {dists[i+1]} ="
+                        f" ({dists[i+1] - dists[i]}) {d}"
+                    )
+
+                    # Add image and run check again
+                    check = True
+
+                    new_dist = (dists[i] + dists[i + 1]) / 2.0
+
+                    self.interpolate(
+                        lerp_fn=lerp_fn,
+                        from_pos_hidden=from_pos_hidden,
+                        from_neg_hidden=from_neg_hidden,
+                        to_pos_hidden=to_pos_hidden,
+                        to_neg_hidden=to_neg_hidden,
+                        inter_pos_hidden=inter_pos_hidden,
+                        inter_neg_hidden=inter_neg_hidden,
+                        alpha=new_dist,
+                    )
+                    with on_cfg_denoiser_wrapper(
+                        partial(set_cond_callback, [inter_pos_hidden, inter_neg_hidden])
+                    ):
+                        # SSIM stats for the new image
+
+                        print(f"Process: {new_dist}")
+                        image = process_p(append=False)[0]
+
+                    # Check if this was an improvment
+                    c = transform(image).unsqueeze(0)
+                    d2 = ssim(a, c)
+
+                    if d2 > d or d2 < ssim_diff * ssim_diff_min / 100.0:
+                        # Keep image if it is improvment or hasn't reached desired min ssim_diff
+                        prompt_images.insert(i + 1, image)
+                        dists.insert(i + 1, new_dist)
+
+                    else:
+                        print(
+                            f"Did not find improvment: {d2} < {d} ({d-d2}) Taking"
+                            " shortcut."
+                        )
+                        not_better += 1
+                        done = i + 1
+
+                    break
+                else:
+                    # DEBUG
+                    if d > ssim_diff:
+                        if i > done:
+                            print(
+                                f"Done: {dists[i+1]*100}% ({d}) {len(dists)} frames.   "
+                            )
+                    else:
+                        print(
+                            f"Reached minimum step limit @{dists[i]} (Skipping) SSIM ="
+                            f" {d}   "
+                        )
+                        if skip_ssim_min > d:
+                            skip_ssim_min = d
+                        skip_count += 1
+                    done = i
+            # DEBUG
+        print("SSIM done!")
+
+        if skip_count > 0:
+            print(
+                f"Minimum step limits reached: {skip_count} Worst: {skip_ssim_min} No"
+                f" improvment: {not_better}"
+            )
+
+        return skip_count, not_better, skip_ssim_min, min_step, prompt_images
 
     ''' ↓↓↓ extension support ↓↓↓ '''
 
