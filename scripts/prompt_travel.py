@@ -473,8 +473,7 @@ class Script(scripts.Script):
                 " generate the steps you've specified above,                 but then"
                 " take a second pass and fill in the gaps between images that differ"
                 " too much according to Structual Similarity Index Metric \n           "
-                "         *Only implemented for linear travel and only for fixed or"
-                " successive frame genesis*"
+                " *Only implemented for linear travel and only for fixed frame genesis*"
             )
             ssim_diff = gr.Slider(
                 label="SSIM threshold", value=0.0, minimum=0.0, maximum=1.0, step=0.01
