@@ -7,6 +7,7 @@ import inspect
 import os
 from pathlib import Path
 from PIL.Image import Image as PILImage
+from PIL import ImageFilter
 from enum import Enum
 from dataclasses import dataclass
 from functools import partial
@@ -908,7 +909,6 @@ class Script(scripts.Script):
                 a_img: PILImage = prompt_images[i]
                 b_img: PILImage = prompt_images[i + 1]
                 if self.ssim_blur > 0:
-                    from PIL import ImageFilter
                     a_img: PILImage = prompt_images[i].filter(ImageFilter.GaussianBlur(radius=self.ssim_blur))
                     b_img: PILImage = prompt_images[i + 1].filter(ImageFilter.GaussianBlur(radius=self.ssim_blur))
                     
@@ -946,8 +946,12 @@ class Script(scripts.Script):
                         print(f"Process: {new_dist}")
                         image = process_p(append=False)[0]
 
+                    c_img = image
                     # Check if this was an improvment
-                    c = transform(image).unsqueeze(0)
+                    if self.ssim_blur > 0:
+                        c_img: PILImage = image.filter(ImageFilter.GaussianBlur(radius=self.ssim_blur))
+                    
+                    c = transform(c_img).unsqueeze(0)
                     d2 = ssim(a, c)
 
                     if d2 > d or d2 < ssim_diff * ssim_diff_min / 100.0:
