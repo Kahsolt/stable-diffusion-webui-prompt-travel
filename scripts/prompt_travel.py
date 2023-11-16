@@ -486,7 +486,7 @@ class Script(scripts.Script):
                 label="SSIM min threshold", value=75, minimum=0, maximum=100, step=1
             )
             ssim_blur = gr.Slider(
-                label="SSIM blur (helps with images featuring many small changing details)", value=0, minimum=0, maximum=100, step=1
+                label="SSIM blur (helps with images featuring many small changing details)", value=0, minimum=0, maximum=20, step=1
             )
 
         return [
