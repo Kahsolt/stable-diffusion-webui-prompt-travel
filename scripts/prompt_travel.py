@@ -7,6 +7,7 @@ import inspect
 import os
 from pathlib import Path
 from PIL.Image import Image as PILImage
+from PIL import ImageFilter
 from enum import Enum
 from dataclasses import dataclass
 from functools import partial
@@ -393,6 +394,9 @@ def switch_to_stage_binding_(self:'Script', i:int):
     self.p.prompt = self.pos_prompts[i]
     if hasattr(self, 'neg_prompts'):
         self.p.negative_prompt = self.neg_prompts[i]
+    if i > 0:
+        self.p.hr_prompt = self.pos_prompts[i]
+        self.p.hr_negative_prompt = self.neg_prompts[i]
     self.p.subseed = self.subseed
 
 def process_p_binding_(self:'Script', append:bool=True, save:bool=True) -> PILImages:
@@ -446,11 +450,6 @@ class Script(scripts.Script):
         with gr.Row(variant='compact', visible=DEFAULT_DEPTH) as tab_ext_depth:
             depth_img = gr.Image(label=LABEL_DEPTH_IMG, source='upload', type='pil', image_mode=None)
 
-        with gr.Row(variant='compact', visible=DEFAULT_UPSCALE) as tab_ext_upscale:
-            upscale_meth   = gr.Dropdown(label=LABEL_UPSCALE_METH,   value=lambda: DEFAULT_UPSCALE_METH,   choices=CHOICES_UPSCALER)
-            upscale_ratio  = gr.Slider  (label=LABEL_UPSCALE_RATIO,  value=lambda: DEFAULT_UPSCALE_RATIO,  minimum=1.0, maximum=16.0, step=0.1)
-            upscale_width  = gr.Slider  (label=LABEL_UPSCALE_WIDTH,  value=lambda: DEFAULT_UPSCALE_WIDTH,  minimum=0, maximum=2048, step=8)
-            upscale_height = gr.Slider  (label=LABEL_UPSCALE_HEIGHT, value=lambda: DEFAULT_UPSCALE_HEIGHT, minimum=0, maximum=2048, step=8)
 
         with gr.Row(variant='compact', visible=DEFAULT_VIDEO) as tab_ext_video:
             video_fmt  = gr.Dropdown(label=LABEL_VIDEO_FMT,  value=lambda: DEFAULT_VIDEO_FMT, choices=CHOICES_VIDEO_FMT)
@@ -460,13 +459,14 @@ class Script(scripts.Script):
 
         with gr.Row(variant='compact') as tab_ext:
             ext_video   = gr.Checkbox(label=LABEL_VIDEO,   value=lambda: DEFAULT_VIDEO) 
-            ext_upscale = gr.Checkbox(label=LABEL_UPSCALE, value=lambda: DEFAULT_UPSCALE) 
             ext_depth   = gr.Checkbox(label=LABEL_DEPTH,   value=lambda: DEFAULT_DEPTH)
         
             ext_video  .change(gr_show, inputs=ext_video,   outputs=tab_ext_video,   show_progress=False)
-            ext_upscale.change(gr_show, inputs=ext_upscale, outputs=tab_ext_upscale, show_progress=False)
             ext_depth  .change(gr_show, inputs=ext_depth,   outputs=tab_ext_depth,   show_progress=False)
 
+        with gr.Row(variant='compact', visible=True) as tab_ext_upscale:
+            gr.Markdown("Use hires fix options for upscaling!")
+            
         with gr.Accordion(label="Structual Similarity Index Metric", open=False):
             gr.Markdown(
                 "If this is set to something other than 0, the script will first"
@@ -486,16 +486,15 @@ class Script(scripts.Script):
                 label="SSIM min threshold", value=75, minimum=0, maximum=100, step=1
             )
             ssim_blur = gr.Slider(
-                label="SSIM blur (helps with images featuring many small changing details)", value=0, minimum=0, maximum=100, step=1
+                label="SSIM blur (helps with images featuring many small changing details)", value=0, minimum=0, maximum=20, step=1
             )
 
         return [
             mode, lerp_meth, replace_dim, replace_order,
             steps, genesis, denoise_w, embryo_step,
             depth_img,
-            upscale_meth, upscale_ratio, upscale_width, upscale_height,
             video_fmt, video_fps, video_pad, video_pick,
-            ext_video, ext_upscale, ext_depth, ssim_diff, ssim_ccrop,
+            ext_video, ext_depth, ssim_diff, ssim_ccrop,
             substep_min, ssim_diff_min, ssim_blur
         ]
 
@@ -503,9 +502,8 @@ class Script(scripts.Script):
             mode:str, lerp_meth:str, replace_dim:str, replace_order:str,
             steps:str, genesis:str, denoise_w:float, embryo_step:str,
             depth_img:PILImage,
-            upscale_meth:str, upscale_ratio:float, upscale_width:int, upscale_height:int,
             video_fmt:str, video_fps:float, video_pad:int, video_pick:str,
-            ext_video:bool, ext_upscale:bool, ext_depth:bool,
+            ext_video:bool, ext_depth:bool,
             ssim_diff: float, ssim_ccrop:int,
             substep_min:float, ssim_diff_min:int, ssim_blur:int
         ):
@@ -606,7 +604,6 @@ class Script(scripts.Script):
         self.images: PILImages = []
         self.info: StrRef = Ref()
         try:
-            if ext_upscale: on_before_image_saved(upscale_image_callback)
             if ext_depth: self.ext_depth_preprocess(p, depth_img)
 
             runner = getattr(self, f'run_{mode.value}')
@@ -618,7 +615,6 @@ class Script(scripts.Script):
             self.info.value = e
         finally:
             if ext_depth: self.ext_depth_postprocess(p, depth_img)
-            if ext_upscale: remove_callbacks_for_function(upscale_image_callback)
 
         # Save video
         if ext_video: save_video(self.images, video_slice, video_pad, video_fps, video_fmt, os.path.join(self.log_dp, f'travel-{travel_number:05}'))
@@ -908,7 +904,6 @@ class Script(scripts.Script):
                 a_img: PILImage = prompt_images[i]
                 b_img: PILImage = prompt_images[i + 1]
                 if self.ssim_blur > 0:
-                    from PIL import ImageFilter
                     a_img: PILImage = prompt_images[i].filter(ImageFilter.GaussianBlur(radius=self.ssim_blur))
                     b_img: PILImage = prompt_images[i + 1].filter(ImageFilter.GaussianBlur(radius=self.ssim_blur))
                     
@@ -946,8 +941,12 @@ class Script(scripts.Script):
                         print(f"Process: {new_dist}")
                         image = process_p(append=False)[0]
 
+                    c_img = image
                     # Check if this was an improvment
-                    c = transform(image).unsqueeze(0)
+                    if self.ssim_blur > 0:
+                        c_img: PILImage = image.filter(ImageFilter.GaussianBlur(radius=self.ssim_blur))
+                    
+                    c = transform(c_img).unsqueeze(0)
                     d2 = ssim(a, c)
 
                     if d2 > d or d2 < ssim_diff * ssim_diff_min / 100.0:
