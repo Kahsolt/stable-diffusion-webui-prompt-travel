@@ -58,8 +58,9 @@ The latest version `v3.1` is synced & tested with:
 
 ⚪ Fixups
 
-- 2023/07/05: sync sd-webui-controlnet to `v1.1.229`
-- 2023/04/30: update controlnet core to `v1.1.116`
+- 2023/12/29: fix bad ffmpeg envvar, update controlnet to `v1.1.424`
+- 2023/07/05: update controlnet to `v1.1.229`
+- 2023/04/30: update controlnet to `v1.1.116`
 - 2023/03/29: `v2.4` bug fixes on script hook, now working correctly with extra networks & [sd-webui-controlnet](https://github.com/Mikubill/sd-webui-controlnet)
 - 2023/01/31: keep up with webui's updates, (issue #14: `ImportError: cannot import name 'single_sample_to_image'`)
 - 2023/01/28: keep up with webui's updates, extra-networks rework
