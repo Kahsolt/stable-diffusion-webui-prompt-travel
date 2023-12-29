@@ -11,10 +11,10 @@ from PIL import ImageFilter
 from enum import Enum
 from dataclasses import dataclass
 from functools import partial
-from typing import List, Tuple, Callable, Any, Union, Optional, Generic, TypeVar
+from typing import List, Tuple, Callable, Union, Optional, Generic, TypeVar
 from traceback import print_exc, format_exc
 from torchmetrics import StructuralSimilarityIndexMeasure
-from torchvision import transforms
+from torchvision import transforms as T
 
 import gradio as gr
 import numpy as np
@@ -28,12 +28,11 @@ except ImportError:
     print(f'{LOG_PREFIX} package moviepy not installed, will not be able to generate video')
 
 import modules.scripts as scripts
-from modules.script_callbacks import on_before_image_saved, ImageSaveParams, on_cfg_denoiser, CFGDenoiserParams, remove_callbacks_for_function
+from modules.script_callbacks import on_cfg_denoiser, CFGDenoiserParams, remove_callbacks_for_function
 from modules.ui import gr_show
-from modules.shared import state, opts, sd_upscalers
+from modules.shared import state, opts
 from modules.processing import process_images, get_fixed_seed
 from modules.processing import Processed, StableDiffusionProcessing as Processing, StableDiffusionProcessingTxt2Img as ProcessingTxt2Img, StableDiffusionProcessingImg2Img as ProcessingImg2Img
-from modules.images import resize_image
 from modules.sd_samplers_common import single_sample_to_image
 
 try:
@@ -41,8 +40,8 @@ try:
 except ImportError:
     '''
     DictWithShape {
-    'crossattn': Tensor,
-    'vector': Tensor,
+        'crossattn': Tensor,
+        'vector': Tensor,
     }
     '''
     class DictWithShape(dict):
@@ -110,11 +109,6 @@ if 'consts':
     LABEL_VIDEO_FMT         = 'Video file format'
     LABEL_VIDEO_PAD         = 'Pad begin/end frames'
     LABEL_VIDEO_PICK        = 'Pick frame by slice'
-    LABEL_UPSCALE           = 'Ext. upscale'
-    LABEL_UPSCALE_METH      = 'Upscaler'
-    LABEL_UPSCALE_RATIO     = 'Upscale ratio'
-    LABEL_UPSCALE_WIDTH     = 'Upscale width'
-    LABEL_UPSCALE_HEIGHT    = 'Upscale height'
     LABEL_DEPTH             = 'Ext. depth-image-io (for depth2img models)'
     LABEL_DEPTH_IMG         = 'Depth image file'
 
@@ -126,11 +120,6 @@ if 'consts':
     DEFAULT_LERP_METH       = __(LABEL_LERP_METH, LerpMethod.LERP.value)
     DEFAULT_REPLACE_DIM     = __(LABEL_REPLACE_DIM, ModeReplaceDim.TOKEN.value)
     DEFAULT_REPLACE_ORDER   = __(LABEL_REPLACE_ORDER, ModeReplaceOrder.RANDOM.value)
-    DEFAULT_UPSCALE         = __(LABEL_UPSCALE, False)
-    DEFAULT_UPSCALE_METH    = __(LABEL_UPSCALE_METH, 'Lanczos')
-    DEFAULT_UPSCALE_RATIO   = __(LABEL_UPSCALE_RATIO, 2.0)
-    DEFAULT_UPSCALE_WIDTH   = __(LABEL_UPSCALE_WIDTH, 0)
-    DEFAULT_UPSCALE_HEIGHT  = __(LABEL_UPSCALE_HEIGHT, 0)
     DEFAULT_VIDEO           = __(LABEL_VIDEO, True)
     DEFAULT_VIDEO_FPS       = __(LABEL_VIDEO_FPS, 10)
     DEFAULT_VIDEO_FMT       = __(LABEL_VIDEO_FMT, VideoFormat.MP4.value)
@@ -143,7 +132,6 @@ if 'consts':
     CHOICES_GENESIS         = [x.value for x in Gensis]
     CHOICES_REPLACE_DIM     = [x.value for x in ModeReplaceDim]
     CHOICES_REPLACE_ORDER   = [x.value for x in ModeReplaceOrder]
-    CHOICES_UPSCALER        = [x.name for x in sd_upscalers]
     CHOICES_VIDEO_FMT       = [x.value for x in VideoFormat]
 
     EPS = 1e-6
@@ -281,30 +269,6 @@ def parse_slice(picker:str) -> Optional[slice]:
     
     return slice(start, stop, step)
 
-def parse_resolution(width:int, height:int, upscale_ratio:float, upscale_width:int, upscale_height:int) -> Tuple[bool, Tuple[int, int]]:
-    if upscale_width == upscale_height == 0:
-        if upscale_ratio == 1.0:
-            return False, (width, height)
-        else:
-            return True, (round(width * upscale_ratio), round(height * upscale_ratio))
-    else:
-        if upscale_width  == 0: upscale_width  = round(width  * upscale_height / height)
-        if upscale_height == 0: upscale_height = round(height * upscale_width  / width)
-        return (width != upscale_width and height != upscale_height), (upscale_width, upscale_height)
-
-
-def upscale_image(img:PILImage, width:int, height:int, upscale_meth:str, upscale_ratio:float, upscale_width:int, upscale_height:int) -> PILImage:
-    if upscale_meth == 'None': return img
-    need_upscale, (tgt_w, tgt_h) = parse_resolution(width, height, upscale_ratio, upscale_width, upscale_height)
-    if need_upscale:
-        if 'show_debug': print(f'>> upscale: ({width}, {height}) => ({tgt_w}, {tgt_h})')
-
-        if max(tgt_w / width, tgt_h / height) > 4:      # must split into two rounds for NN model capatibility
-            hf_w, hf_h = round(width * 4), round(height * 4)
-            img = resize_image(0, img, hf_w, hf_h, upscaler_name=upscale_meth)
-        img = resize_image(0, img, tgt_w, tgt_h, upscaler_name=upscale_meth)
-    return img
-
 def save_video(imgs:PILImages, video_slice:slice, video_pad:int, video_fps:float, video_fmt:VideoFormat, fbase:str):
     if len(imgs) <= 1 or 'ImageSequenceClip' not in globals(): return
 
@@ -317,13 +281,23 @@ def save_video(imgs:PILImages, video_slice:slice, video_pad:int, video_fps:float
         seq: List[np.ndarray] = [np.asarray(img) for img in imgs]
         try:
             clip = ImageSequenceClip(seq, fps=video_fps)
-        except:     # images may have different size (small probability due to upscaler)
+        except:     # images may have different size (do not know why
             clip = concatenate_videoclips([ImageClip(img, duration=1/video_fps) for img in seq], method='compose')
             clip.fps = video_fps
         if   video_fmt == VideoFormat.MP4:  clip.write_videofile(fbase + '.mp4',  verbose=False, audio=False)
         elif video_fmt == VideoFormat.WEBM: clip.write_videofile(fbase + '.webm', verbose=False, audio=False)
         elif video_fmt == VideoFormat.GIF:  clip.write_gif      (fbase + '.gif',  loop=True)
     except: print_exc()
+
+def scribble_debug(image: PILImage, txt: str):
+    """Draws text on image for dev tests"""
+    from PIL import Image, ImageDraw
+    from modules import images
+    draw = ImageDraw.Draw(image)
+    fnt = images.get_font(14)
+    box = draw.textbbox((12, 12), txt, font=fnt)
+    draw.rounded_rectangle(box, radius=4, fill="black")
+    draw.text((12, 12), txt, fill="white", font=fnt)
 
 
 class on_cfg_denoiser_wrapper:
@@ -450,7 +424,6 @@ class Script(scripts.Script):
         with gr.Row(variant='compact', visible=DEFAULT_DEPTH) as tab_ext_depth:
             depth_img = gr.Image(label=LABEL_DEPTH_IMG, source='upload', type='pil', image_mode=None)
 
-
         with gr.Row(variant='compact', visible=DEFAULT_VIDEO) as tab_ext_video:
             video_fmt  = gr.Dropdown(label=LABEL_VIDEO_FMT,  value=lambda: DEFAULT_VIDEO_FMT, choices=CHOICES_VIDEO_FMT)
             video_fps  = gr.Number  (label=LABEL_VIDEO_FPS,  value=lambda: DEFAULT_VIDEO_FPS)
@@ -458,15 +431,11 @@ class Script(scripts.Script):
             video_pick = gr.Text    (label=LABEL_VIDEO_PICK, value=lambda: DEFAULT_VIDEO_PICK, max_lines=1)
 
         with gr.Row(variant='compact') as tab_ext:
-            ext_video   = gr.Checkbox(label=LABEL_VIDEO,   value=lambda: DEFAULT_VIDEO) 
-            ext_depth   = gr.Checkbox(label=LABEL_DEPTH,   value=lambda: DEFAULT_DEPTH)
-        
-            ext_video  .change(gr_show, inputs=ext_video,   outputs=tab_ext_video,   show_progress=False)
-            ext_depth  .change(gr_show, inputs=ext_depth,   outputs=tab_ext_depth,   show_progress=False)
+            ext_video = gr.Checkbox(label=LABEL_VIDEO, value=lambda: DEFAULT_VIDEO) 
+            ext_depth = gr.Checkbox(label=LABEL_DEPTH, value=lambda: DEFAULT_DEPTH)
+            ext_video.change(gr_show, inputs=ext_video, outputs=tab_ext_video, show_progress=False)
+            ext_depth.change(gr_show, inputs=ext_depth, outputs=tab_ext_depth, show_progress=False)
 
-        with gr.Row(variant='compact', visible=True) as tab_ext_upscale:
-            gr.Markdown("Use hires fix options for upscaling!")
-            
         with gr.Accordion(label="Structual Similarity Index Metric", open=False):
             gr.Markdown(
                 "If this is set to something other than 0, the script will first"
@@ -494,8 +463,8 @@ class Script(scripts.Script):
             steps, genesis, denoise_w, embryo_step,
             depth_img,
             video_fmt, video_fps, video_pad, video_pick,
-            ext_video, ext_depth, ssim_diff, ssim_ccrop,
-            substep_min, ssim_diff_min, ssim_blur
+            ext_video, ext_depth,
+            ssim_diff, ssim_ccrop, substep_min, ssim_diff_min, ssim_blur,
         ]
 
     def run(self, p:Processing, 
@@ -504,8 +473,7 @@ class Script(scripts.Script):
             depth_img:PILImage,
             video_fmt:str, video_fps:float, video_pad:int, video_pick:str,
             ext_video:bool, ext_depth:bool,
-            ssim_diff: float, ssim_ccrop:int,
-            substep_min:float, ssim_diff_min:int, ssim_blur:int
+            ssim_diff:float, ssim_ccrop:int, substep_min:float, ssim_diff_min:int, ssim_blur:int,
         ):
         
         # enum lookup
@@ -594,10 +562,7 @@ class Script(scripts.Script):
         self.ssim_ccrop     = ssim_ccrop
         self.substep_min    = substep_min
         self.ssim_diff_min  = ssim_diff_min
-        self.ssim_blur = ssim_blur
-
-        def upscale_image_callback(params:ImageSaveParams):
-            params.image = upscale_image(params.image, p.width, p.height, upscale_meth, upscale_ratio, upscale_width, upscale_height)
+        self.ssim_blur      = ssim_blur
 
         # Dispatch
         self.p: Processing = p
@@ -711,28 +676,9 @@ class Script(scripts.Script):
                 )
                 self.images = self.images[: -(n_inter + 1)] + interpolated_images
 
-            
             # move to next stage
             from_pos_hidden.value, from_neg_hidden.value = to_pos_hidden.value, to_neg_hidden.value
             inter_pos_hidden.value, inter_neg_hidden.value = None, None
-
-    def interpolate(
-        self,
-        lerp_fn,
-        from_pos_hidden,
-        from_neg_hidden,
-        to_pos_hidden,
-        to_neg_hidden,
-        inter_pos_hidden,
-        inter_neg_hidden,
-        alpha,
-    ):
-        inter_pos_hidden.value = lerp_fn(
-            from_pos_hidden.value, to_pos_hidden.value, alpha
-        )
-        inter_neg_hidden.value = lerp_fn(
-            from_neg_hidden.value, to_neg_hidden.value, alpha
-        )
 
     def run_linear_embryo(self):
         ''' NOTE: this procedure has special logic, we separate it from run_linear() so far '''
@@ -851,6 +797,22 @@ class Script(scripts.Script):
             from_pos_hidden.value = to_pos_hidden.value
             inter_pos_hidden.value = None
 
+    ''' ↓↓↓ ssim ↓↓↓ '''
+
+    def interpolate(
+        self,
+        lerp_fn,
+        from_pos_hidden,
+        from_neg_hidden,
+        to_pos_hidden,
+        to_neg_hidden,
+        inter_pos_hidden,
+        inter_neg_hidden,
+        alpha,
+    ):
+        inter_pos_hidden.value = lerp_fn(from_pos_hidden.value, to_pos_hidden.value, alpha)
+        inter_neg_hidden.value = lerp_fn(from_neg_hidden.value, to_neg_hidden.value, alpha)
+
     def ssim_loop(
         self,
         p,
@@ -875,19 +837,12 @@ class Script(scripts.Script):
 
         ssim = StructuralSimilarityIndexMeasure(data_range=1.0)
         if ssim_ccrop == 0:
-            transform = transforms.Compose([transforms.ToTensor()])
+            transform = T.ToTensor()
         else:
-            transform = transforms.Compose(
-                [
-                    transforms.CenterCrop(
-                        (
-                            p.height * (ssim_ccrop / 100),
-                            p.width * (ssim_ccrop / 100),
-                        )
-                    ),
-                    transforms.ToTensor(),
-                ]
-            )
+            transform = T.Compose([
+                T.CenterCrop((p.height * (ssim_ccrop / 100), p.width * (ssim_ccrop / 100))),
+                T.ToTensor(),
+            ])
 
         check = True
         skip_count = 0
@@ -897,26 +852,23 @@ class Script(scripts.Script):
 
         done = 0
         while check:
-            if state.interrupted:
-                break
+            if state.interrupted: break
+
             check = False
             for i in range(done, len(prompt_images) - 1):
                 a_img: PILImage = prompt_images[i]
                 b_img: PILImage = prompt_images[i + 1]
                 if self.ssim_blur > 0:
-                    a_img: PILImage = prompt_images[i].filter(ImageFilter.GaussianBlur(radius=self.ssim_blur))
-                    b_img: PILImage = prompt_images[i + 1].filter(ImageFilter.GaussianBlur(radius=self.ssim_blur))
-                    
+                    a_img = a_img.filter(ImageFilter.GaussianBlur(radius=self.ssim_blur))
+                    b_img = b_img.filter(ImageFilter.GaussianBlur(radius=self.ssim_blur))
+
                 # Check distance between i and i+1
                 a = transform(a_img).unsqueeze(0)
                 b = transform(b_img).unsqueeze(0)
                 d = ssim(a, b)
 
                 if d < ssim_diff and (dists[i + 1] - dists[i]) > substep_min:
-                    print(
-                        f"SSIM: {dists[i]} <-> {dists[i+1]} ="
-                        f" ({dists[i+1] - dists[i]}) {d}"
-                    )
+                    print(f"SSIM: {dists[i]} <-> {dists[i+1]} = ({dists[i+1] - dists[i]}) {d}")
 
                     # Add image and run check again
                     check = True
@@ -937,7 +889,6 @@ class Script(scripts.Script):
                         partial(set_cond_callback, [inter_pos_hidden, inter_neg_hidden])
                     ):
                         # SSIM stats for the new image
-
                         print(f"Process: {new_dist}")
                         image = process_p(append=False)[0]
 
@@ -956,10 +907,7 @@ class Script(scripts.Script):
                         dists.insert(i + 1, new_dist)
 
                     else:
-                        print(
-                            f"Did not find improvment: {d2} < {d} ({d-d2}) Taking"
-                            " shortcut."
-                        )
+                        print(f"Did not find improvment: {d2} < {d} ({d-d2}) Taking shortcut.")
                         not_better += 1
                         done = i + 1
 
@@ -968,14 +916,9 @@ class Script(scripts.Script):
                     # DEBUG
                     if d > ssim_diff:
                         if i > done:
-                            print(
-                                f"Done: {dists[i+1]*100}% ({d}) {len(dists)} frames.   "
-                            )
+                            print(f"Done: {dists[i+1]*100}% ({d}) {len(dists)} frames.")
                     else:
-                        print(
-                            f"Reached minimum step limit @{dists[i]} (Skipping) SSIM ="
-                            f" {d}   "
-                        )
+                        print(f"Reached minimum step limit @{dists[i]} (Skipping) SSIM = {d}")
                         if skip_ssim_min > d:
                             skip_ssim_min = d
                         skip_count += 1
@@ -984,10 +927,7 @@ class Script(scripts.Script):
         print("SSIM done!")
 
         if skip_count > 0:
-            print(
-                f"Minimum step limits reached: {skip_count} Worst: {skip_ssim_min} No"
-                f" improvment: {not_better}"
-            )
+            print(f"Minimum step limits reached: {skip_count} Worst: {skip_ssim_min} No improvment: {not_better}")
 
         return skip_count, not_better, skip_ssim_min, min_step, prompt_images
 
@@ -1036,13 +976,3 @@ class Script(scripts.Script):
 
     def ext_depth_postprocess(self, p:Processing, depth_img:PILImage):
         depth_img.close()
-
-def scribble_debug(image: PILImage, txt: str):
-    """Draws text on image for dev tests"""
-    from PIL import Image, ImageDraw
-    from modules import images
-    draw = ImageDraw.Draw(image)
-    fnt = images.get_font(14)
-    box = draw.textbbox((12, 12), txt, font=fnt)
-    draw.rounded_rectangle(box, radius=4, fill="black")
-    draw.text((12, 12), txt, fill="white", font=fnt)

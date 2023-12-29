@@ -26,10 +26,8 @@ if 'externel repo sanity check':
         print(f'{LOG_PREFIX} extension {CTRLNET_REPO_NAME} found, ControlNet-Travel loaded :)')
     except ImportError:
         print(f'{LOG_PREFIX} extension {CTRLNET_REPO_NAME} not found, ControlNet-Travel ignored :(')
-        exit(0)
     except:
         print_exc()
-        exit(0)
 
 # ↑↑↑ EXIT EARLY IF EXTERNAL REPOSITORY NOT FOUND ↑↑↑
 
@@ -41,6 +39,7 @@ from PIL import Image
 from ldm.models.diffusion.ddpm import LatentDiffusion
 from modules import shared, devices, lowvram
 from modules.processing import StableDiffusionProcessing as Processing
+from modules.script_callbacks import ImageSaveParams, on_before_image_saved
 
 from scripts.prompt_travel import *
 
@@ -640,12 +639,6 @@ class Script(scripts.Script):
             with gr.Row(variant='compact'):
                 skip_mid   = gr.Checkbox(label='mid')
 
-        with gr.Row(variant='compact', visible=DEFAULT_UPSCALE) as tab_ext_upscale:
-            upscale_meth   = gr.Dropdown(label=LABEL_UPSCALE_METH,   value=lambda: DEFAULT_UPSCALE_METH,   choices=CHOICES_UPSCALER)
-            upscale_ratio  = gr.Slider  (label=LABEL_UPSCALE_RATIO,  value=lambda: DEFAULT_UPSCALE_RATIO,  minimum=1.0, maximum=16.0, step=0.1)
-            upscale_width  = gr.Slider  (label=LABEL_UPSCALE_WIDTH,  value=lambda: DEFAULT_UPSCALE_WIDTH,  minimum=0,   maximum=2048, step=8)
-            upscale_height = gr.Slider  (label=LABEL_UPSCALE_HEIGHT, value=lambda: DEFAULT_UPSCALE_HEIGHT, minimum=0,   maximum=2048, step=8)
-
         with gr.Row(variant='compact', visible=DEFAULT_VIDEO) as tab_ext_video:
             video_fmt  = gr.Dropdown(label=LABEL_VIDEO_FMT,  value=lambda: DEFAULT_VIDEO_FMT, choices=CHOICES_VIDEO_FMT)
             video_fps  = gr.Number  (label=LABEL_VIDEO_FPS,  value=lambda: DEFAULT_VIDEO_FPS)
@@ -654,12 +647,10 @@ class Script(scripts.Script):
 
         with gr.Row(variant='compact') as tab_ext:
             ext_video     = gr.Checkbox(label=LABEL_VIDEO,      value=lambda: DEFAULT_VIDEO)
-            ext_upscale   = gr.Checkbox(label=LABEL_UPSCALE,    value=lambda: DEFAULT_UPSCALE)
             ext_skip_fuse = gr.Checkbox(label=LABEL_SKIP_FUSE,  value=lambda: DEFAULT_SKIP_FUSE)
             dbg_rife      = gr.Checkbox(label=LABEL_DEBUG_RIFE, value=lambda: DEFAULT_DEBUG_RIFE)
-        
+
             ext_video    .change(gr_show, inputs=ext_video,     outputs=tab_ext_video,     show_progress=False)
-            ext_upscale  .change(gr_show, inputs=ext_upscale,   outputs=tab_ext_upscale,   show_progress=False)
             ext_skip_fuse.change(gr_show, inputs=ext_skip_fuse, outputs=tab_ext_skip_fuse, show_progress=False)
 
         skip_fuses = [
@@ -679,17 +670,15 @@ class Script(scripts.Script):
         ]
         return [
             interp_meth, steps, ctrlnet_ref_dir,
-            upscale_meth, upscale_ratio, upscale_width, upscale_height,
             video_fmt, video_fps, video_pad, video_pick,
-            ext_video, ext_upscale, ext_skip_fuse, dbg_rife,
+            ext_video, ext_skip_fuse, dbg_rife,
             *skip_fuses,
         ]
 
     def run(self, p:Processing, 
             interp_meth:str, steps:str, ctrlnet_ref_dir:str, 
-            upscale_meth:str, upscale_ratio:float, upscale_width:int, upscale_height:int,
             video_fmt:str, video_fps:float, video_pad:int, video_pick:str,
-            ext_video:bool, ext_upscale:bool, ext_skip_fuse:bool, dbg_rife:bool,
+            ext_video:bool, ext_skip_fuse:bool, dbg_rife:bool,
             *skip_fuses:bool,
         ):
 
@@ -775,14 +764,9 @@ class Script(scripts.Script):
         self.interp_meth = interp_meth
         self.dbg_rife    = dbg_rife
 
-        def upscale_image_callback(params:ImageSaveParams):
-            params.image = upscale_image(params.image, p.width, p.height, upscale_meth, upscale_ratio, upscale_width, upscale_height)
-
         images: List[PILImage] = []
         info: str = None
         try:
-            if ext_upscale: on_before_image_saved(upscale_image_callback)
-
             self.UnetHook_hook_original = UnetHook.hook
             UnetHook.hook = hook_hijack
 
@@ -802,8 +786,6 @@ class Script(scripts.Script):
                 self.controlnet_script.latest_network: UnetHook
                 self.controlnet_script.latest_network.restore(p.sd_model.model.diffusion_model)
                 self.controlnet_script.latest_network = None
-
-            if ext_upscale: remove_callbacks_for_function(upscale_image_callback)
 
             reset_cuda()
 
