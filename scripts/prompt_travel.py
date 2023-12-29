@@ -22,6 +22,8 @@ import torch
 from torch import Tensor
 import torch.nn.functional as F
 try:
+    # override any user defaults, in case some newbies has a broken env :(
+    os.environ['FFMPEG_BINARY'] = 'ffmpeg-imageio'
     from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
     from moviepy.editor import concatenate_videoclips, ImageClip
 except ImportError:
