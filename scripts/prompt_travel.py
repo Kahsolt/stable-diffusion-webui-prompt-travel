@@ -833,6 +833,7 @@ class Script(scripts.Script):
         inter_neg_hidden,
     ):
         """Copied from shift-attentions plugin: https://github.com/yownas/shift-attention/blob/0129f6b99109f6f7c9e4e2bee0d1dc5f96e62506/scripts/shift_attention.py#L268"""
+        import torchvision.transforms as T
 
         dist_per_image = 1 / (len(prompt_images) - 1)
         dists = [dist_per_image * (i) for i, _ in enumerate(prompt_images)]
